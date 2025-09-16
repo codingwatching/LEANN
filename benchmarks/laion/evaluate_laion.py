@@ -4,6 +4,7 @@ LAION Multimodal Benchmark Evaluation Script - Modular Recall-based Evaluation
 
 import argparse
 import json
+import logging
 import os
 import pickle
 import time
@@ -13,6 +14,13 @@ import numpy as np
 from leann import LeannSearcher
 from leann_backend_hnsw import faiss
 from sentence_transformers import SentenceTransformer
+
+from ..llm_utils import evaluate_multimodal_rag, load_qwen_vl_model
+
+# Setup logging to reduce verbose output
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("leann.api").setLevel(logging.WARNING)
+logging.getLogger("leann_backend_hnsw").setLevel(logging.WARNING)
 
 
 class RecallEvaluator:
@@ -388,13 +396,22 @@ def main():
     )
     parser.add_argument(
         "--stage",
-        choices=["2", "3", "4", "all"],
+        choices=["2", "3", "4", "5", "all"],
         default="all",
-        help="Which stage to run (2=recall, 3=complexity, 4=index comparison)",
+        help="Which stage to run (2=recall, 3=complexity, 4=index comparison, 5=generation)",
     )
     parser.add_argument("--complexity", type=int, default=None, help="Complexity for search")
     parser.add_argument("--baseline-dir", default="baseline", help="Baseline output directory")
     parser.add_argument("--output", help="Save results to JSON file")
+    parser.add_argument(
+        "--llm-backend",
+        choices=["hf"],
+        default="hf",
+        help="LLM backend (Qwen2.5-VL only supports HF)",
+    )
+    parser.add_argument(
+        "--model-name", default="Qwen/Qwen2.5-VL-7B-Instruct", help="Multimodal model name"
+    )
 
     args = parser.parse_args()
 
@@ -615,12 +632,69 @@ def main():
             evaluator.cleanup()
             print("✅ Stage 4 completed!\n")
 
+        if args.stage in ("5", "all"):
+            print("🚀 Starting Stage 5: Multimodal generation with Qwen2.5-VL")
+            evaluator = LAIONEvaluator(args.index)
+            captions = evaluator.load_queries(args.queries)
+            test_captions = captions[: min(20, len(captions))]  # Use subset for generation
+
+            print(f"🧪 Testing multimodal generation with {len(test_captions)} queries")
+
+            # Load Qwen2.5-VL model
+            try:
+                print("Loading Qwen2.5-VL model...")
+                processor, model = load_qwen_vl_model(args.model_name)
+
+                # Run multimodal generation evaluation
+                complexity = args.complexity or 64
+                gen_results = evaluate_multimodal_rag(
+                    evaluator.searcher,
+                    test_captions,
+                    processor=processor,
+                    model=model,
+                    complexity=complexity,
+                )
+
+                print("\n📊 Multimodal Generation Results:")
+                print(f"  Total Queries: {len(test_captions)}")
+                print(f"  Avg Search Time: {gen_results['avg_search_time']:.3f}s")
+                print(f"  Avg Generation Time: {gen_results['avg_generation_time']:.3f}s")
+                total_time = gen_results["avg_search_time"] + gen_results["avg_generation_time"]
+                search_pct = (gen_results["avg_search_time"] / total_time) * 100
+                gen_pct = (gen_results["avg_generation_time"] / total_time) * 100
+                print(f"  Time Distribution: Search {search_pct:.1f}%, Generation {gen_pct:.1f}%")
+                print("  LLM Backend: HuggingFace transformers")
+                print(f"  Model: {args.model_name}")
+
+                # Show sample results
+                print("\n📝 Sample Multimodal Generations:")
+                for i, response in enumerate(gen_results["results"][:3]):
+                    # Handle both string and dict formats for captions
+                    if isinstance(test_captions[i], dict):
+                        caption_text = test_captions[i].get("query", str(test_captions[i]))
+                    else:
+                        caption_text = str(test_captions[i])
+                    print(f"  Query {i + 1}: {caption_text[:60]}...")
+                    print(f"  Response {i + 1}: {response[:100]}...")
+                    print()
+
+            except Exception as e:
+                print(f"❌ Multimodal generation evaluation failed: {e}")
+                print("💡 Make sure transformers and Qwen2.5-VL are installed")
+                import traceback
+
+                traceback.print_exc()
+
+            evaluator.cleanup()
+            print("✅ Stage 5 completed!\n")
+
         if args.stage == "all":
             print("🎉 All evaluation stages completed successfully!")
             print("\n📋 Summary:")
             print("  Stage 2: ✅ Multimodal Recall@3 evaluation completed")
             print("  Stage 3: ✅ Optimal complexity found")
             print("  Stage 4: ✅ Index comparison analysis completed")
+            print("  Stage 5: ✅ Multimodal generation evaluation completed")
             print("\n🔧 Recommended next steps:")
             print("  - Use optimal complexity for best speed/accuracy balance")
             print("  - Review index comparison for storage vs performance tradeoffs")

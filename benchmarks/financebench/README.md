@@ -45,9 +45,9 @@ This will:
 # Basic retrieval evaluation
 python evaluate_financebench.py --index data/index/financebench_full_hnsw.leann
 
-# Include QA evaluation with OpenAI
-export OPENAI_API_KEY="your-key"
-python evaluate_financebench.py --index data/index/financebench_full_hnsw.leann --qa-samples 20
+
+# RAG generation evaluation with Qwen3-8B
+python evaluate_financebench.py --index data/index/financebench_full_hnsw.leann --stage 4 --complexity 64 --llm-backend hf --model-name Qwen/Qwen3-8B --output results_qwen3.json
 ```
 
 ## Evaluation Methods
@@ -84,6 +84,24 @@ LLM-based answer evaluation using GPT-4o:
 - **Build Time**: ~5-10 minutes with sentence-transformers/all-mpnet-base-v2
 
 *Note: Number match rate >100% indicates multiple retrieved documents contain the same financial figures, which is expected behavior for financial data appearing across multiple document sections.
+
+### LEANN-RAG Generation Performance (Qwen3-8B)
+
+- **Stage 4 (Index Comparison):**
+  - Compact Index: 5.0 MB
+  - Non-compact Index: 172.2 MB
+  - **Storage Saving**: 97.1%
+- **Search Performance**:
+  - Non-compact (no recompute): 0.009s avg per query
+  - Compact (with recompute): 2.203s avg per query
+  - Speed ratio: 0.004x
+
+**Generation Evaluation (20 queries, complexity=64):**
+- **Average Search Time**: 1.638s per query
+- **Average Generation Time**: 45.957s per query
+- **LLM Backend**: HuggingFace transformers
+- **Model**: Qwen/Qwen3-8B (thinking model with <think></think> processing)
+- **Total Questions Processed**: 20
 
 ## Options
 

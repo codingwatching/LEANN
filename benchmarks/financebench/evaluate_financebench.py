@@ -4,19 +4,24 @@ FinanceBench Evaluation Script - Modular Recall-based Evaluation
 
 import argparse
 import json
+import logging
 import os
 import pickle
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import openai
-
-# Import LEANN modules - this will bring in the modified faiss
 from leann import LeannChat, LeannSearcher
-
-# Import LEANN's modified faiss directly
 from leann_backend_hnsw import faiss
+
+from ..llm_utils import evaluate_rag, generate_hf, generate_vllm, load_hf_model, load_vllm_model
+
+# Setup logging to reduce verbose output
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("leann.api").setLevel(logging.WARNING)
+logging.getLogger("leann_backend_hnsw").setLevel(logging.WARNING)
 
 
 class RecallEvaluator:
@@ -125,7 +130,6 @@ class FinanceBenchEvaluator:
 
     def analyze_index_sizes(self) -> dict:
         """Analyze index sizes with and without embeddings"""
-        from pathlib import Path
 
         print("📏 Analyzing index sizes...")
 
@@ -136,7 +140,6 @@ class FinanceBenchEvaluator:
 
         sizes = {}
         total_with_embeddings = 0
-        total_without_embeddings = 0
 
         # Core index files
         index_file = index_dir / f"{index_name}.index"
@@ -155,28 +158,14 @@ class FinanceBenchEvaluator:
                 sizes[name] = size_mb
                 total_with_embeddings += size_mb
 
-                # For pruned index calculation, exclude the main index file (contains embeddings)
-                if name != "index":
-                    total_without_embeddings += size_mb
             else:
                 sizes[name] = 0
 
-        # Estimate pruned index size (approximate)
-        # When embeddings are removed, the main index file becomes much smaller
-        # Rough estimate: graph structure is ~10-20% of full index size
-        estimated_pruned_index_size = sizes["index"] * 0.15  # Conservative estimate
-        total_without_embeddings += estimated_pruned_index_size
-
         sizes["total_with_embeddings"] = total_with_embeddings
-        sizes["total_without_embeddings"] = total_without_embeddings
-        sizes["estimated_pruned_index"] = estimated_pruned_index_size
-        sizes["compression_ratio"] = (
-            total_without_embeddings / total_with_embeddings if total_with_embeddings > 0 else 0
-        )
+        sizes["index_only_mb"] = sizes["index"]  # Just the .index file for fair comparison
 
-        print(f"  📁 Index with embeddings: {total_with_embeddings:.1f} MB")
-        print(f"  📁 Estimated pruned index: {total_without_embeddings:.1f} MB")
-        print(f"  🗜️  Compression ratio: {sizes['compression_ratio']:.2f}x")
+        print(f"  📁 Total index size: {total_with_embeddings:.1f} MB")
+        print(f"  📁 Index file only: {sizes['index']:.1f} MB")
 
         return sizes
 
@@ -185,7 +174,6 @@ class FinanceBenchEvaluator:
         print("🏗️ Building compact index from existing passages...")
 
         # Load existing passages from current index
-        from pathlib import Path
 
         from leann import LeannBuilder
 
@@ -241,7 +229,6 @@ class FinanceBenchEvaluator:
         print("🏗️ Building non-compact index from existing passages...")
 
         # Load existing passages from current index
-        from pathlib import Path
 
         from leann import LeannBuilder
 
@@ -555,13 +542,7 @@ Respond with exactly one word: "CORRECT" if the generated answer is factually ac
         # Legacy single index analysis (fallback)
         if "total_with_embeddings" in timing_metrics and "current_index" not in timing_metrics:
             print("\n📏 Index Size Analysis:")
-            print(
-                f"  Index with embeddings: {timing_metrics.get('total_with_embeddings', 0):.1f} MB"
-            )
-            print(
-                f"  Estimated pruned index: {timing_metrics.get('total_without_embeddings', 0):.1f} MB"
-            )
-            print(f"  Compression ratio: {timing_metrics.get('compression_ratio', 0):.2f}x")
+            print(f"  Total index size: {timing_metrics.get('total_with_embeddings', 0):.1f} MB")
 
         print("\n📊 Accuracy:")
         print(f"  Accuracy: {timing_metrics.get('accuracy', 0) * 100:.1f}%")
@@ -610,6 +591,10 @@ def main():
     parser.add_argument("--baseline-dir", default="baseline", help="Baseline output directory")
     parser.add_argument("--openai-api-key", help="OpenAI API key for generation evaluation")
     parser.add_argument("--output", help="Save results to JSON file")
+    parser.add_argument(
+        "--llm-backend", choices=["openai", "hf", "vllm"], default="openai", help="LLM backend"
+    )
+    parser.add_argument("--model-name", default="Qwen3-8B", help="Model name for HF/vLLM")
 
     args = parser.parse_args()
 
@@ -768,7 +753,9 @@ def main():
             print("🚀 Starting Stage 4: Comprehensive evaluation with dual index comparison")
 
             # Use FinanceBench evaluator for QA evaluation
-            evaluator = FinanceBenchEvaluator(args.index, args.openai_api_key)
+            evaluator = FinanceBenchEvaluator(
+                args.index, args.openai_api_key if args.llm_backend == "openai" else None
+            )
 
             print("📖 Loading FinanceBench dataset...")
             data = evaluator.load_dataset(args.dataset)
@@ -802,20 +789,13 @@ def main():
             print(
                 f"  Non-compact index: {non_compact_size_metrics['total_with_embeddings']:.1f} MB"
             )
-            _ = (
-                (
-                    non_compact_size_metrics["total_with_embeddings"]
-                    - compact_size_metrics["total_with_embeddings"]
-                )
-                / compact_size_metrics["total_with_embeddings"]
-                * 100
-            )
+            print("\n📊 Index-only size comparison (.index file only):")
+            print(f"  Compact index: {compact_size_metrics['index_only_mb']:.1f} MB")
+            print(f"  Non-compact index: {non_compact_size_metrics['index_only_mb']:.1f} MB")
+            # Use index-only size for fair comparison (same as Enron emails)
             storage_saving = (
-                (
-                    non_compact_size_metrics["total_with_embeddings"]
-                    - compact_size_metrics["total_with_embeddings"]
-                )
-                / non_compact_size_metrics["total_with_embeddings"]
+                (non_compact_size_metrics["index_only_mb"] - compact_size_metrics["index_only_mb"])
+                / non_compact_size_metrics["index_only_mb"]
                 * 100
             )
             print(f"  Storage saving by compact: {storage_saving:.1f}%")
@@ -829,15 +809,58 @@ def main():
                 non_compact_index_path, args.index, data[:10], complexity=complexity
             )
 
-            # Step 5: Timing breakdown evaluation WITH recompute (production mode)
+            # Step 5: Generation evaluation
             test_samples = 20
-            print(f"\n🧪 Testing with first {test_samples} samples for timing analysis")
-            print(
-                "\n🔍🤖 Running timing breakdown evaluation (WITH recompute - production mode)..."
-            )
-            evaluation_start = time.time()
-            timing_metrics = evaluator.evaluate_timing_breakdown(data[:test_samples])
-            evaluation_time = time.time() - evaluation_start
+            print(f"\n🧪 Testing with first {test_samples} samples for generation analysis")
+
+            if args.llm_backend == "openai" and args.openai_api_key:
+                print("🔍🤖 Running OpenAI-based generation evaluation...")
+                evaluation_start = time.time()
+                timing_metrics = evaluator.evaluate_timing_breakdown(data[:test_samples])
+                evaluation_time = time.time() - evaluation_start
+            else:
+                print(
+                    f"🔍🤖 Running {args.llm_backend} generation evaluation with {args.model_name}..."
+                )
+                try:
+                    # Load LLM
+                    if args.llm_backend == "hf":
+                        tokenizer, model = load_hf_model(args.model_name)
+
+                        def llm_func(prompt):
+                            return generate_hf(tokenizer, model, prompt)
+                    else:  # vllm
+                        llm, sampling_params = load_vllm_model(args.model_name)
+
+                        def llm_func(prompt):
+                            return generate_vllm(llm, sampling_params, prompt)
+
+                    # Simple generation evaluation
+                    queries = [item["question"] for item in data[:test_samples]]
+                    gen_results = evaluate_rag(
+                        evaluator.searcher,
+                        llm_func,
+                        queries,
+                        domain="finance",
+                        complexity=complexity,
+                    )
+
+                    timing_metrics = {
+                        "total_questions": len(queries),
+                        "avg_search_time": gen_results["avg_search_time"],
+                        "avg_generation_time": gen_results["avg_generation_time"],
+                        "results": gen_results["results"],
+                    }
+                    evaluation_time = time.time()
+
+                except Exception as e:
+                    print(f"❌ Generation evaluation failed: {e}")
+                    timing_metrics = {
+                        "total_questions": 0,
+                        "avg_search_time": 0,
+                        "avg_generation_time": 0,
+                    }
+                    evaluation_time = 0
 
             # Combine all metrics
             combined_metrics = {
@@ -849,8 +872,11 @@ def main():
                 "storage_saving_percent": storage_saving,
             }
 
-            # Print comprehensive results
-            evaluator._print_results(combined_metrics)
+            # Print results
+            print("\n📊 Generation Results:")
+            print(f"  Total Questions: {timing_metrics.get('total_questions', 0)}")
+            print(f"  Avg Search Time: {timing_metrics.get('avg_search_time', 0):.3f}s")
+            print(f"  Avg Generation Time: {timing_metrics.get('avg_generation_time', 0):.3f}s")
 
             # Save results if requested
             if args.output:

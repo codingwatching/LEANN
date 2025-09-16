@@ -1,6 +1,6 @@
 # LAION Multimodal Benchmark
 
-A multimodal benchmark for evaluating image retrieval performance using LEANN with CLIP embeddings on LAION dataset subset.
+A multimodal benchmark for evaluating image retrieval and generation performance using LEANN with CLIP embeddings and Qwen2.5-VL for multimodal generation on LAION dataset subset.
 
 ## Overview
 
@@ -9,6 +9,7 @@ This benchmark evaluates:
 - **Recall@K performance** for image search
 - **Complexity analysis** across different search parameters
 - **Index size and storage efficiency**
+- **Multimodal generation** with Qwen2.5-VL for image understanding and description
 
 ## Dataset Configuration
 
@@ -39,9 +40,13 @@ This will:
 python evaluate_laion.py --index data/laion_index.leann
 
 # Run specific stages
-python evaluate_laion.py --index data/laion_index.leann --stage timing
-python evaluate_laion.py --index data/laion_index.leann --stage recall
-python evaluate_laion.py --index data/laion_index.leann --stage complexity
+python evaluate_laion.py --index data/laion_index.leann --stage 2  # Recall evaluation
+python evaluate_laion.py --index data/laion_index.leann --stage 3  # Complexity analysis
+python evaluate_laion.py --index data/laion_index.leann --stage 4  # Index comparison
+python evaluate_laion.py --index data/laion_index.leann --stage 5  # Multimodal generation
+
+# Multimodal generation with Qwen2.5-VL
+python evaluate_laion.py --index data/laion_index.leann --stage 5 --model-name Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
 ### 3. Save results
@@ -74,22 +79,25 @@ python evaluate_laion.py \
 
 ## Evaluation Stages
 
-### Stage 1: Index Analysis
-- Analyzes index file sizes and metadata
-- Reports storage efficiency
-
-### Stage 2: Search Timing
-- Measures average search latency
-- Tests with configurable complexity and top-k
-- Reports searches per second
-
-### Stage 3: Recall Evaluation
-- Evaluates Recall@K using ground truth
+### Stage 2: Recall Evaluation
+- Evaluates Recall@3 for multimodal retrieval
+- Compares LEANN vs FAISS baseline performance
 - Self-recall: query caption should retrieve original image
 
-### Stage 4: Complexity Analysis
-- Tests performance across different complexity levels [16, 32, 64, 128]
+### Stage 3: Complexity Analysis
+- Binary search for optimal complexity (90% recall target)
+- Tests performance across different complexity levels
 - Analyzes speed vs. accuracy tradeoffs
+
+### Stage 4: Index Comparison
+- Compares compact vs non-compact index sizes
+- Measures search performance differences
+- Reports storage efficiency and speed ratios
+
+### Stage 5: Multimodal Generation
+- Uses Qwen2.5-VL for image understanding and description
+- Retrieval-Augmented Generation (RAG) with multimodal context
+- Measures both search and generation timing
 
 ## Output Metrics
 
@@ -100,48 +108,70 @@ python evaluate_laion.py \
 - Latency in milliseconds
 
 ### Recall Metrics
-- Recall@K percentage
+- Recall@3 percentage for image retrieval
 - Number of queries with ground truth
 
 ### Index Metrics
 - Total index size (MB)
 - Component breakdown (index, passages, metadata)
+- Storage savings (compact vs non-compact)
 - Backend and embedding model info
 
-## Example Results
+### Generation Metrics (Stage 5)
+- Average search time per query
+- Average generation time per query
+- Time distribution (search vs generation)
+- Sample multimodal responses
+- Model: Qwen2.5-VL performance
+
+## Benchmark Results
+
+### LEANN-RAG Performance (CLIP ViT-L/14 + Qwen2.5-VL)
+
+**Stage 3: Optimal Complexity Analysis**
+- **Optimal Complexity**: 85 (achieving 90% Recall@3)
+- **Binary Search Range**: 1-128
+- **Target Recall**: 90%
+- **Index Type**: Non-compact (for fast binary search)
+
+**Stage 5: Multimodal Generation Performance (Qwen2.5-VL)**
+- **Total Queries**: 20
+- **Average Search Time**: 1.200s per query
+- **Average Generation Time**: 6.558s per query
+- **Time Distribution**: Search 15.5%, Generation 84.5%
+- **LLM Backend**: HuggingFace transformers
+- **Model**: Qwen/Qwen2.5-VL-7B-Instruct
+- **Optimal Complexity**: 85
+
+**System Performance:**
+- **Index Size**: ~10,000 image embeddings from LAION subset
+- **Embedding Model**: CLIP ViT-L/14 (768 dimensions)
+- **Backend**: HNSW with cosine distance
+
+### Example Results
 
 ```
 🎯 LAION MULTIMODAL BENCHMARK RESULTS
 ============================================================
 
-📏 Index Information:
-  Total size: 145.2 MB
-  Backend: hnsw
-  Embedding model: clip-vit-b-32
-  Total passages: 10000
+📊 Multimodal Generation Results:
+  Total Queries: 20
+  Avg Search Time: 1.200s
+  Avg Generation Time: 6.558s
+  Time Distribution: Search 15.5%, Generation 84.5%
+  LLM Backend: HuggingFace transformers
+  Model: Qwen/Qwen2.5-VL-7B-Instruct
 
-⚡ Search Performance:
-  Total queries: 200
-  Average search time: 0.023s
-  Median search time: 0.021s
-  Min/Max search time: 0.012s / 0.089s
-  Std dev: 0.008s
-  Complexity: 64
-  Top-K: 3
-
-📊 Recall Performance:
-  Recall@3: 85.5%
-  Queries with ground truth: 200
-
-⚙️ Complexity Analysis:
-  Complexity  16: 0.015s avg
-  Complexity  32: 0.019s avg
-  Complexity  64: 0.023s avg
-  Complexity 128: 0.031s avg
+⚙️ Optimal Complexity Analysis:
+  Target Recall: 90%
+  Optimal Complexity: 85
+  Binary Search Range: 1-128
+  Non-compact Index (fast search, no recompute)
 
 🚀 Performance Summary:
-  Searches per second: 43.5
-  Latency (ms): 23.0ms
+  Multimodal RAG: 7.758s total per query
+  Search: 15.5% of total time
+  Generation: 84.5% of total time
 ```
 
 ## Directory Structure
