@@ -6,8 +6,6 @@ single implementation. When running from the repo without installation, it
 adds the `packages/leann-core/src` directory to `sys.path` as a fallback.
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 
