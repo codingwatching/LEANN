@@ -74,7 +74,7 @@ class ChromeHistoryReader(BaseReader):
                 if count >= max_count and max_count > 0:
                     break
 
-                last_visit, url, title, visit_count, typed_count, hidden = row
+                last_visit, url, title, visit_count, typed_count, _hidden = row
 
                 # Create document content with metadata embedded in text
                 doc_content = f"""
