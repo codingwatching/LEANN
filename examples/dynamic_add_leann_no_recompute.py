@@ -17,6 +17,19 @@ Usage examples:
   uv run python examples/dynamic_add_leann_no_recompute.py --add-incremental \
     --add-dir /Users/yichuan/Desktop/code/LEANN/leann/test_add \
     --index-dir ./test_doc_files
+
+Quick recompute test (both true):
+  # Recompute build
+  uv run python examples/dynamic_add_leann_no_recompute.py --build-base \
+    --recompute-build --ef-construction 200 \
+    --base-dir /Users/yichuan/Desktop/code/LEANN/leann/data \
+    --index-dir ./test_doc_files --index-name documents.leann
+
+  # Recompute add
+  uv run python examples/dynamic_add_leann_no_recompute.py --add-incremental \
+    --recompute-add --ef-construction 32 \
+    --add-dir /Users/yichuan/Desktop/code/LEANN/leann/test_add \
+    --index-dir ./test_doc_files --index-name documents.leann
 """
 
 import argparse
@@ -32,8 +45,29 @@ CORE_SRC = ROOT / "packages" / "leann-core" / "src"
 HNSW_PKG_DIR = ROOT / "packages" / "leann-backend-hnsw"
 APPS_DIR = ROOT / "apps"
 
-# Prepend precise paths so the core module name `leann` resolves to leann-core
-for p in [CORE_SRC, HNSW_PKG_DIR, APPS_DIR]:
+
+# Prefer the installed backend if available (it contains the compiled extension)
+def _prefer_installed(pkg_name: str) -> bool:
+    try:
+        import importlib
+        import importlib.util
+
+        spec = importlib.util.find_spec(pkg_name)
+        if spec and spec.origin and "site-packages" in spec.origin:
+            # ensure the faiss shim/extension is importable from the installed package
+            importlib.import_module(f"{pkg_name}.faiss")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# Prepend paths, but only add the repo backend if the installed one is not present
+paths_to_prepend = [CORE_SRC, APPS_DIR]
+if not _prefer_installed("leann_backend_hnsw"):
+    paths_to_prepend.insert(1, HNSW_PKG_DIR)
+
+for p in paths_to_prepend:
     p_str = str(p)
     if p_str not in sys.path:
         sys.path.insert(0, p_str)
@@ -113,6 +147,8 @@ def build_base_index(
     chunk_overlap: int,
     file_types: Optional[list[str]] = None,
     max_items: int = -1,
+    ef_construction: Optional[int] = None,
+    recompute_build: bool = False,
 ) -> str:
     print(f"Building base index from: {base_dir}")
     documents = _load_documents(base_dir, required_exts=file_types)
@@ -135,7 +171,7 @@ def build_base_index(
     _ensure_index_dir(index_dir_path)
     index_path = index_dir_path / index_name
 
-    print("Creating HNSW index with no-recompute (non-compact)...")
+    print("Creating HNSW index (non-compact)...")
     from leann.api import LeannBuilder
     from leann.registry import register_project_directory
 
@@ -143,8 +179,9 @@ def build_base_index(
         backend_name="hnsw",
         embedding_model=embedding_model,
         embedding_mode=embedding_mode,
-        is_recompute=False,
+        is_recompute=recompute_build,
         is_compact=False,
+        efConstruction=(ef_construction if ef_construction is not None else 200),
     )
     for t in texts:
         builder.add_text(t)
@@ -167,6 +204,8 @@ def add_incremental(
     chunk_overlap: int = 128,
     file_types: Optional[list[str]] = None,
     max_items: int = -1,
+    ef_construction: Optional[int] = None,
+    recompute_add: bool = False,
 ) -> str:
     print(f"Adding incremental data from: {add_dir}")
     index_dir_path = Path(index_dir)
@@ -207,7 +246,12 @@ def add_incremental(
         print("No new chunks to add.")
         return str(index_path)
 
-    added = incremental_add_texts_with_context(ctx, prepared_texts)
+    added = incremental_add_texts_with_context(
+        ctx,
+        prepared_texts,
+        ef_construction=ef_construction,
+        recompute=recompute_add,
+    )
 
     print(f"Incremental add completed. Added {added} chunks. Index: {index_path}")
     return str(index_path)
@@ -268,6 +312,15 @@ def main():
     parser.add_argument("--chunk-overlap", type=int, default=128)
     parser.add_argument("--file-types", nargs="+", default=None)
     parser.add_argument("--max-items", type=int, default=-1)
+    parser.add_argument("--ef-construction", type=int, default=32)
+    parser.add_argument(
+        "--recompute-add", action="store_true", help="Enable recompute-mode add (non-compact only)"
+    )
+    parser.add_argument(
+        "--recompute-build",
+        action="store_true",
+        help="Enable recompute-mode base build (non-compact only)",
+    )
 
     args = parser.parse_args()
 
@@ -288,6 +341,8 @@ def main():
             chunk_overlap=args.chunk_overlap,
             file_types=args.file_types,
             max_items=args.max_items,
+            ef_construction=args.ef_construction,
+            recompute_build=args.recompute_build,
         )
 
     if args.add_incremental:
@@ -301,6 +356,8 @@ def main():
             chunk_overlap=args.chunk_overlap,
             file_types=args.file_types,
             max_items=args.max_items,
+            ef_construction=args.ef_construction,
+            recompute_add=args.recompute_add,
         )
 
     # Optional: quick test query using searcher
@@ -312,7 +369,7 @@ def main():
             query = "what is LEANN?"
             if args.add_incremental:
                 query = "what is the multi vector search and how it works?"
-            results = searcher.search(query, top_k=5, recompute_embeddings=False)
+            results = searcher.search(query, top_k=5)
             if results:
                 print(f"Sample result: {results[0].text[:80]}...")
         except Exception:

@@ -15,6 +15,7 @@ from leann.registry import register_backend
 from leann.searcher_base import BaseSearcher
 
 from .convert_to_csr import convert_hnsw_graph_to_csr
+from .prune_index import prune_embeddings_preserve_graph_inplace
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,16 @@ class HNSWBuilder(LeannBackendBuilderInterface):
         index_file = index_dir / f"{index_prefix}.index"
         faiss.write_index(index, str(index_file))
 
-        if self.is_compact:
-            self._convert_to_csr(index_file)
+        if self.is_recompute:
+            if self.is_compact:
+                self._convert_to_csr(index_file)
+            else:
+                # Non-compact format: prune only embeddings, keep original graph
+                ok = prune_embeddings_preserve_graph_inplace(str(index_file))
+                if not ok:
+                    raise RuntimeError(
+                        "Pruning embeddings while preserving graph failed for non-compact index"
+                    )
 
     def _convert_to_csr(self, index_file: Path):
         """Convert built index to CSR format"""
@@ -148,7 +157,13 @@ class HNSWSearcher(BaseSearcher):
             self.is_pruned
         )  # In C++ code, it's called is_recompute, but it's only for loading IIUC.
 
-        self._index = faiss.read_index(str(index_file), faiss.IO_FLAG_MMAP, hnsw_config)
+        # If pruned (recompute mode), explicitly skip storage to avoid reading
+        # the pruned section. Still allow MMAP for graph.
+        io_flags = faiss.IO_FLAG_MMAP
+        if self.is_pruned:
+            io_flags |= faiss.IO_FLAG_SKIP_STORAGE
+
+        self._index = faiss.read_index(str(index_file), io_flags, hnsw_config)
 
     def search(
         self,
@@ -251,3 +266,55 @@ class HNSWSearcher(BaseSearcher):
         string_labels = [[str(int_label) for int_label in batch_labels] for batch_labels in labels]
 
         return {"labels": string_labels, "distances": distances}
+
+
+# ---------- Helper API for incremental add (Python-level) ----------
+def add_vectors(
+    index_file_path: str,
+    embeddings: np.ndarray,
+    *,
+    ef_construction: Optional[int] = None,
+    recompute: bool = False,
+) -> None:
+    """Append vectors to an existing non-compact HNSW index.
+
+    Args:
+        index_file_path: Path to the HNSW .index file
+        embeddings: float32 numpy array (N, D)
+        ef_construction: Optional override for efConstruction during insertion
+        recompute: Reserved for future use to control insertion-time recompute behaviors
+    """
+    from . import faiss  # type: ignore
+
+    if embeddings.dtype != np.float32:
+        embeddings = embeddings.astype(np.float32)
+    if not embeddings.flags.c_contiguous:
+        embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
+
+    # Load index normally to ensure storage is present; toggle is_recompute on the object
+    index = faiss.read_index(str(index_file_path), faiss.IO_FLAG_MMAP)
+
+    # Best-effort: explicitly set flag on the object if the binding exposes it
+    try:
+        index.is_recompute = bool(recompute)
+    except Exception:
+        pass
+    try:
+        if ef_construction is not None:
+            index.hnsw.efConstruction = int(ef_construction)
+    except Exception:
+        # Best-effort; ignore if backend doesn't expose setter
+        pass
+
+    # For non-compact HNSW, calling add directly is sufficient. When is_recompute is set
+    # (via config or attribute), FAISS will run the insertion/search path accordingly.
+    # To strictly follow per-point insert semantics in recompute mode, add one-by-one.
+    if recompute:
+        # Insert row by row
+        n = embeddings.shape[0]
+        for i in range(n):
+            row = embeddings[i : i + 1]
+            index.add(1, faiss.swig_ptr(row))
+    else:
+        index.add(embeddings.shape[0], faiss.swig_ptr(embeddings))
+    faiss.write_index(index, str(index_file_path))

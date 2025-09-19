@@ -5,6 +5,7 @@ with the correct, original embedding logic from the user's reference code.
 
 import json
 import logging
+import os
 import pickle
 import re
 import subprocess
@@ -19,6 +20,7 @@ import numpy as np
 from leann.interface import LeannBackendSearcherInterface
 
 from .chat import get_llm
+from .embedding_server_manager import EmbeddingServerManager
 from .interface import LeannBackendFactoryInterface
 from .metadata_filter import MetadataFilterEngine
 from .registry import BACKEND_REGISTRY
@@ -490,9 +492,7 @@ class LeannBuilder:
             is_compact = self.backend_kwargs.get("is_compact", True)
             is_recompute = self.backend_kwargs.get("is_recompute", True)
             meta_data["is_compact"] = is_compact
-            meta_data["is_pruned"] = (
-                is_compact and is_recompute
-            )  # Pruned only if compact and recompute
+            meta_data["is_pruned"] = is_recompute  # Pruned only if compact and recompute
         with open(leann_meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
 
@@ -1105,6 +1105,8 @@ def incremental_add_texts(
     *,
     embedding_model: Optional[str] = None,
     embedding_mode: Optional[str] = None,
+    ef_construction: Optional[int] = None,
+    recompute: bool = False,
 ) -> int:
     """Incrementally add text chunks to an existing HNSW index built with no-recompute.
 
@@ -1139,38 +1141,70 @@ def incremental_add_texts(
     assigned_ids = _append_passages_and_update_offsets(passages_file, offsets_file, texts)
 
     # Compute embeddings
-    embeddings = compute_embeddings(
-        texts,
-        model_name=model_name,
-        mode=mode_name,
-        use_server=False,
-        is_build=True,
-    )
+    # Embedding computation path
+    esm = None
+    port = None
+    if recompute:
+        # Determine distance metric early for server config
+        distance_metric = meta.get("backend_kwargs", {}).get("distance_metric", "mips").lower()
+        # Start embedding server and compute via ZMQ for consistency with recompute semantics
+        passages_source_file = f"{index_path}.meta.json"
+        esm = EmbeddingServerManager(
+            backend_module_name="leann_backend_hnsw.hnsw_embedding_server",
+        )
+        started, port = esm.start_server(
+            port=5557,
+            model_name=model_name,
+            embedding_mode=mode_name,
+            passages_file=passages_source_file,
+            distance_metric=distance_metric,
+            enable_warmup=False,
+        )
+        if not started:
+            raise RuntimeError("Failed to start embedding server for recompute add")
+        embeddings = compute_embeddings_via_server(texts, model_name, port)
+    else:
+        embeddings = compute_embeddings(
+            texts,
+            model_name=model_name,
+            mode=mode_name,
+            use_server=False,
+            is_build=True,
+        )
 
     # Normalize for cosine if needed
-    distance_metric = meta.get("backend_kwargs", {}).get("distance_metric", "mips").lower()
+    if "distance_metric" not in locals():
+        distance_metric = meta.get("backend_kwargs", {}).get("distance_metric", "mips").lower()
     if distance_metric == "cosine":
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1
         embeddings = embeddings / norms
 
-    # Load vector index and append
+    # Append via backend helper (supports ef_construction/recompute plumbing)
     try:
-        from leann_backend_hnsw import faiss as hnsw_faiss  # type: ignore
+        from leann_backend_hnsw.hnsw_backend import add_vectors as hnsw_add_vectors  # type: ignore
     except Exception as e:
         raise RuntimeError(
-            "Failed to import leann_backend_hnsw.faiss. Ensure HNSW backend is installed."
+            "Failed to import HNSW backend add helper. Ensure HNSW backend is installed."
         ) from e
 
-    index = hnsw_faiss.read_index(str(vector_index_file), hnsw_faiss.IO_FLAG_MMAP)
-    if embeddings.dtype != np.float32:
-        embeddings = embeddings.astype(np.float32)
-    if not embeddings.flags.c_contiguous:
-        embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
+    # Propagate ZMQ port to FAISS add path when recompute is True
+    if recompute and port is not None:
+        os.environ["LEANN_ZMQ_PORT"] = str(port)
 
-    # C++-style signature (n, swig_ptr(x))
-    index.add(embeddings.shape[0], hnsw_faiss.swig_ptr(embeddings))
-    hnsw_faiss.write_index(index, str(vector_index_file))
+    hnsw_add_vectors(
+        str(vector_index_file),
+        embeddings,
+        ef_construction=ef_construction,
+        recompute=recompute,
+    )
+
+    # Stop server after add when recompute path used
+    if esm is not None:
+        try:
+            esm.stop_server()
+        except Exception:
+            pass
 
     # Sanity: ids length should match embeddings rows
     if len(assigned_ids) != embeddings.shape[0]:
@@ -1265,8 +1299,17 @@ def create_incremental_add_context(
     )
 
 
-def incremental_add_texts_with_context(ctx: IncrementalAddContext, texts: list[str]) -> int:
-    """Incrementally add texts using a prepared context (no repeated validation)."""
+def incremental_add_texts_with_context(
+    ctx: IncrementalAddContext,
+    texts: list[str],
+    *,
+    ef_construction: Optional[int] = None,
+    recompute: bool = False,
+) -> int:
+    """Incrementally add texts using a prepared context (no repeated validation).
+
+    For non-compact HNSW, ef_construction (efConstruction) can be overridden during insertion.
+    """
     if not texts:
         return 0
 
@@ -1274,13 +1317,33 @@ def incremental_add_texts_with_context(ctx: IncrementalAddContext, texts: list[s
     _append_passages_and_update_offsets(ctx.passages_file, ctx.offsets_file, texts)
 
     # Compute embeddings
-    embeddings = compute_embeddings(
-        texts,
-        model_name=ctx.embedding_model,
-        mode=ctx.embedding_mode,
-        use_server=False,
-        is_build=True,
-    )
+    # Embedding computation path
+    esm = None
+    port = None
+    if recompute:
+        passages_source_file = f"{ctx.index_path}.meta.json"
+        esm = EmbeddingServerManager(
+            backend_module_name="leann_backend_hnsw.hnsw_embedding_server",
+        )
+        started, port = esm.start_server(
+            port=5557,
+            model_name=ctx.embedding_model,
+            embedding_mode=ctx.embedding_mode,
+            passages_file=passages_source_file,
+            distance_metric=ctx.distance_metric,
+            enable_warmup=False,
+        )
+        if not started:
+            raise RuntimeError("Failed to start embedding server for recompute add")
+        embeddings = compute_embeddings_via_server(texts, ctx.embedding_model, port)
+    else:
+        embeddings = compute_embeddings(
+            texts,
+            model_name=ctx.embedding_model,
+            mode=ctx.embedding_mode,
+            use_server=False,
+            is_build=True,
+        )
 
     # Normalize for cosine if needed
     if ctx.distance_metric == "cosine":
@@ -1288,21 +1351,30 @@ def incremental_add_texts_with_context(ctx: IncrementalAddContext, texts: list[s
         norms[norms == 0] = 1
         embeddings = embeddings / norms
 
-    # Load vector index and append
+    # Append via backend helper (supports ef_construction/recompute plumbing)
     try:
-        from leann_backend_hnsw import faiss as hnsw_faiss  # type: ignore
+        from leann_backend_hnsw.hnsw_backend import add_vectors as hnsw_add_vectors  # type: ignore
     except Exception as e:
         raise RuntimeError(
-            "Failed to import leann_backend_hnsw.faiss. Ensure HNSW backend is installed."
+            "Failed to import HNSW backend add helper. Ensure HNSW backend is installed."
         ) from e
 
-    index = hnsw_faiss.read_index(str(ctx.vector_index_file), hnsw_faiss.IO_FLAG_MMAP)
-    if embeddings.dtype != np.float32:
-        embeddings = embeddings.astype(np.float32)
-    if not embeddings.flags.c_contiguous:
-        embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
-    index.add(embeddings.shape[0], hnsw_faiss.swig_ptr(embeddings))
-    hnsw_faiss.write_index(index, str(ctx.vector_index_file))
+    if recompute and port is not None:
+        os.environ["LEANN_ZMQ_PORT"] = str(port)
+
+    hnsw_add_vectors(
+        str(ctx.vector_index_file),
+        embeddings,
+        ef_construction=ef_construction,
+        recompute=recompute,
+    )
+
+    # Stop server after add when recompute path used
+    if esm is not None:
+        try:
+            esm.stop_server()
+        except Exception:
+            pass
 
     return embeddings.shape[0]
 
