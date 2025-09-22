@@ -18,6 +18,7 @@ demo/experiment_results/**/*.json
 *.eml
 *.emlx
 *.json
+*.png
 !.vscode/*.json
 *.sh
 *.txt
