@@ -310,12 +310,37 @@ jobs:
           uv sync --only-group test
 
           # Install local build artifacts directly so uv resolves dependencies from indexes but uses local wheels
-          uv pip install packages/leann-core/dist/*.whl \
-            || uv pip install packages/leann-core/dist/*.tar.gz
-          uv pip install packages/leann-backend-hnsw/dist/*.whl
-          uv pip install packages/leann-backend-diskann/dist/*.whl
-          uv pip install packages/leann/dist/*.whl \
-            || uv pip install packages/leann/dist/*.tar.gz
+          CORE_WHL=$(find packages/leann-core/dist -maxdepth 1 -name "*.whl" -print -quit)
+          if [[ -n "$CORE_WHL" ]]; then
+            uv pip install "$CORE_WHL"
+          else
+            uv pip install packages/leann-core/dist/*.tar.gz
+          fi
+
+          PY_TAG=$(python -c "import sys; print(f'cp{sys.version_info[0]}{sys.version_info[1]}')")
+
+          HNSW_WHL=$(find packages/leann-backend-hnsw/dist -maxdepth 1 -name "*-${PY_TAG}-*.whl" -print -quit)
+          if [[ -z "$HNSW_WHL" ]]; then
+            echo "No matching HNSW wheel for ${PY_TAG}" >&2
+            find packages/leann-backend-hnsw/dist -maxdepth 1 -name "*.whl"
+            exit 1
+          fi
+          uv pip install "$HNSW_WHL"
+
+          DISKANN_WHL=$(find packages/leann-backend-diskann/dist -maxdepth 1 -name "*-${PY_TAG}-*.whl" -print -quit)
+          if [[ -z "$DISKANN_WHL" ]]; then
+            echo "No matching DiskANN wheel for ${PY_TAG}" >&2
+            find packages/leann-backend-diskann/dist -maxdepth 1 -name "*.whl"
+            exit 1
+          fi
+          uv pip install "$DISKANN_WHL"
+
+          LEANN_WHL=$(find packages/leann/dist -maxdepth 1 -name "*.whl" -print -quit)
+          if [[ -n "$LEANN_WHL" ]]; then
+            uv pip install "$LEANN_WHL"
+          else
+            uv pip install packages/leann/dist/*.tar.gz
+          fi
 
       - name: Run tests with pytest
         env:
