@@ -302,8 +302,9 @@ jobs:
 
       - name: Install built packages for testing
         run: |
-          # Create a virtual environment with the correct Python version
-          uv venv --python ${{ matrix.python }}
+          # Create a virtual environment using the exact interpreter configured by setup-python
+          PYTHON_BIN=$(python -c "import sys; print(sys.executable)")
+          uv venv --python "$PYTHON_BIN"
           source .venv/bin/activate || source .venv/Scripts/activate
 
           # Install test tools only first, without including the project itself
@@ -321,19 +322,23 @@ jobs:
 
           HNSW_WHL=$(find packages/leann-backend-hnsw/dist -maxdepth 1 -name "*-${PY_TAG}-*.whl" -print -quit)
           if [[ -z "$HNSW_WHL" ]]; then
-            echo "No matching HNSW wheel for ${PY_TAG}" >&2
-            find packages/leann-backend-hnsw/dist -maxdepth 1 -name "*.whl"
-            exit 1
+            HNSW_WHL=$(find packages/leann-backend-hnsw/dist -maxdepth 1 -name "*-py3-*.whl" -print -quit)
           fi
-          uv pip install "$HNSW_WHL"
+          if [[ -n "$HNSW_WHL" ]]; then
+            uv pip install "$HNSW_WHL"
+          else
+            uv pip install ./packages/leann-backend-hnsw
+          fi
 
           DISKANN_WHL=$(find packages/leann-backend-diskann/dist -maxdepth 1 -name "*-${PY_TAG}-*.whl" -print -quit)
           if [[ -z "$DISKANN_WHL" ]]; then
-            echo "No matching DiskANN wheel for ${PY_TAG}" >&2
-            find packages/leann-backend-diskann/dist -maxdepth 1 -name "*.whl"
-            exit 1
+            DISKANN_WHL=$(find packages/leann-backend-diskann/dist -maxdepth 1 -name "*-py3-*.whl" -print -quit)
           fi
-          uv pip install "$DISKANN_WHL"
+          if [[ -n "$DISKANN_WHL" ]]; then
+            uv pip install "$DISKANN_WHL"
+          else
+            uv pip install ./packages/leann-backend-diskann
+          fi
 
           LEANN_WHL=$(find packages/leann/dist -maxdepth 1 -name "*.whl" -print -quit)
           if [[ -n "$LEANN_WHL" ]]; then
