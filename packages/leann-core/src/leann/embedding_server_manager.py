@@ -72,7 +72,7 @@ def _safe_stat_signature(path: Path) -> dict:
     return signature
 
 
-def _build_passages_signature(passages_file: str | None) -> Optional[dict]:
+def _build_passages_signature(passages_file: Optional[str]) -> Optional[dict]:
     """Collect modification signatures for metadata and referenced passage files."""
     if not passages_file:
         return None
@@ -224,7 +224,7 @@ class EmbeddingServerManager:
         model_name: str,
         embedding_mode: str,
         provider_options: Optional[dict],
-        passages_file: str | None,
+        passages_file: Optional[str],
     ) -> dict:
         """Create a signature describing the current server configuration."""
         return {
