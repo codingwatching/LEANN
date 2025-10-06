@@ -107,7 +107,7 @@ leann build <index-name> --docs <files-or-directories>
 # Index a single directory
 leann build my-docs --docs ./documents
 
-# Index multiple directories  
+# Index multiple directories
 leann build my-project --docs ./src ./tests ./docs
 
 # Index specific files and directories
@@ -195,7 +195,7 @@ Configure LEANN behavior with environment variables:
 export OPENAI_API_KEY="your-api-key"
 export OPENAI_BASE_URL="https://api.openai.com/v1"  # Custom endpoint
 
-# Ollama Configuration  
+# Ollama Configuration
 export OLLAMA_HOST="http://localhost:11434"  # Default Ollama URL
 export OLLAMA_HOST="http://your-server:11434"  # Custom Ollama server
 
@@ -211,7 +211,7 @@ export LEANN_LOG_LEVEL="INFO"  # DEBUG, INFO, WARNING, ERROR
    ```bash
    # Make sure you're in the right environment
    source .venv/bin/activate
-   
+
    # Or install globally
    uv tool install leann-core --with leann
    ```
@@ -220,7 +220,7 @@ export LEANN_LOG_LEVEL="INFO"  # DEBUG, INFO, WARNING, ERROR
    ```bash
    # Check if Ollama is running
    curl http://localhost:11434/api/tags
-   
+
    # Set custom Ollama URL
    export OLLAMA_HOST="http://your-ollama-server:11434"
    leann build my-docs --docs ./documents --embedding-mode ollama
@@ -230,7 +230,7 @@ export LEANN_LOG_LEVEL="INFO"  # DEBUG, INFO, WARNING, ERROR
    ```bash
    # Set your API key
    export OPENAI_API_KEY="your-api-key"
-   
+
    # Use custom endpoint (e.g., Azure OpenAI)
    export OPENAI_BASE_URL="https://your-endpoint.openai.azure.com/v1"
    ```
@@ -239,7 +239,7 @@ export LEANN_LOG_LEVEL="INFO"  # DEBUG, INFO, WARNING, ERROR
    ```bash
    # Use smaller batch sizes
    leann build my-docs --docs ./documents --batch-size 16
-   
+
    # Use DiskANN for large datasets
    leann build my-docs --docs ./documents --backend diskann
    ```
