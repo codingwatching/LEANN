@@ -29,6 +29,8 @@ class SlackMCPReader:
         workspace_name: Optional[str] = None,
         concatenate_conversations: bool = True,
         max_messages_per_conversation: int = 100,
+        max_retries: int = 5,
+        retry_delay: float = 2.0,
     ):
         """
         Initialize the Slack MCP Reader.
@@ -38,11 +40,15 @@ class SlackMCPReader:
             workspace_name: Optional workspace name to filter messages
             concatenate_conversations: Whether to group messages by channel/thread
             max_messages_per_conversation: Maximum messages to include per conversation
+            max_retries: Maximum number of retries for failed operations
+            retry_delay: Initial delay between retries in seconds
         """
         self.mcp_server_command = mcp_server_command
         self.workspace_name = workspace_name
         self.concatenate_conversations = concatenate_conversations
         self.max_messages_per_conversation = max_messages_per_conversation
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         self.mcp_process = None
 
     async def start_mcp_server(self):
@@ -110,11 +116,73 @@ class SlackMCPReader:
 
         return response.get("result", {}).get("tools", [])
 
+    def _is_cache_sync_error(self, error: dict) -> bool:
+        """Check if the error is related to users cache not being ready."""
+        if isinstance(error, dict):
+            message = error.get("message", "").lower()
+            return (
+                "users cache is not ready" in message or "sync process is still running" in message
+            )
+        return False
+
+    async def _retry_with_backoff(self, func, *args, **kwargs):
+        """Retry a function with exponential backoff, especially for cache sync issues."""
+        last_exception = None
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+
+                # Check if this is a cache sync error
+                error_dict = {}
+                if hasattr(e, "args") and e.args and isinstance(e.args[0], dict):
+                    error_dict = e.args[0]
+                elif "Failed to fetch messages" in str(e):
+                    # Try to extract error from the exception message
+                    import re
+
+                    match = re.search(r"'error':\s*(\{[^}]+\})", str(e))
+                    if match:
+                        try:
+                            error_dict = eval(match.group(1))
+                        except (ValueError, SyntaxError, NameError):
+                            pass
+                    else:
+                        # Try alternative format
+                        match = re.search(r"Failed to fetch messages:\s*(\{[^}]+\})", str(e))
+                        if match:
+                            try:
+                                error_dict = eval(match.group(1))
+                            except (ValueError, SyntaxError, NameError):
+                                pass
+
+                if self._is_cache_sync_error(error_dict):
+                    if attempt < self.max_retries:
+                        delay = self.retry_delay * (2**attempt)  # Exponential backoff
+                        logger.info(
+                            f"Cache sync not ready, waiting {delay:.1f}s before retry {attempt + 1}/{self.max_retries}"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.warning(
+                            f"Cache sync still not ready after {self.max_retries} retries, giving up"
+                        )
+                        break
+                else:
+                    # Not a cache sync error, don't retry
+                    break
+
+        # If we get here, all retries failed or it's not a retryable error
+        raise last_exception
+
     async def fetch_slack_messages(
         self, channel: Optional[str] = None, limit: int = 100
     ) -> list[dict[str, Any]]:
         """
-        Fetch Slack messages using MCP tools.
+        Fetch Slack messages using MCP tools with retry logic for cache sync issues.
 
         Args:
             channel: Optional channel name to filter messages
@@ -122,6 +190,14 @@ class SlackMCPReader:
 
         Returns:
             List of message dictionaries
+        """
+        return await self._retry_with_backoff(self._fetch_slack_messages_impl, channel, limit)
+
+    async def _fetch_slack_messages_impl(
+        self, channel: Optional[str] = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """
+        Internal implementation of fetch_slack_messages without retry logic.
         """
         # This is a generic implementation - specific MCP servers may have different tool names
         # Common tool names might be: 'get_messages', 'list_messages', 'fetch_channel_history'

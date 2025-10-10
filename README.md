@@ -777,7 +777,7 @@ Once your iMessage conversations are indexed, you can search with queries like:
 
 ### MCP Integration: RAG on Live Data from Any Platform
 
-**NEW!** Connect to live data sources through the Model Context Protocol (MCP). LEANN now supports real-time RAG on platforms like Slack, Twitter, and more through standardized MCP servers.
+Connect to live data sources through the Model Context Protocol (MCP). LEANN now supports real-time RAG on platforms like Slack, Twitter, and more through standardized MCP servers.
 
 **Key Benefits:**
 - **Live Data Access**: Fetch real-time data without manual exports
@@ -801,18 +801,17 @@ python -m apps.slack_rag \
   --query "What did we decide about the product launch?"
 ```
 
-**Setup Requirements:**
+**📖 Comprehensive Setup Guide**: For detailed setup instructions, troubleshooting common issues (like "users cache is not ready yet"), and advanced configuration options, see our [**Slack Setup Guide**](docs/slack-setup-guide.md).
+
+**Quick Setup:**
 1. Install a Slack MCP server (e.g., `npm install -g slack-mcp-server`)
-2. Create a Slack App and get API credentials:
-   - Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
-   - Under "OAuth & Permissions", add these Bot Token Scopes: `channels:read`, `channels:history`, `groups:read`, `groups:history`, `im:read`, `im:history`, `mpim:read`, `mpim:history`
-   - Install the app to your workspace and copy the "Bot User OAuth Token" (starts with `xoxb-`)
-   - Under "App-Level Tokens", create a token with `connections:write` scope (starts with `xapp-`)
+2. Create a Slack App and get API credentials (see detailed guide above)
+3. Set environment variables:
    ```bash
    export SLACK_BOT_TOKEN="xoxb-your-bot-token"
-   export SLACK_APP_TOKEN="xapp-your-app-token"
+   export SLACK_APP_TOKEN="xapp-your-app-token"  # Optional
    ```
-3. Test connection with `--test-connection` flag
+4. Test connection with `--test-connection` flag
 
 **Arguments:**
 - `--mcp-server`: Command to start the Slack MCP server
@@ -820,6 +819,8 @@ python -m apps.slack_rag \
 - `--channels`: Specific channels to index (optional)
 - `--concatenate-conversations`: Group messages by channel (default: true)
 - `--max-messages-per-channel`: Limit messages per channel (default: 100)
+- `--max-retries`: Maximum retries for cache sync issues (default: 5)
+- `--retry-delay`: Initial delay between retries in seconds (default: 2.0)
 
 #### 🐦 Twitter Bookmarks: Your Personal Tweet Library
 
@@ -921,7 +922,7 @@ Want to add support for other platforms? LEANN's MCP integration is designed for
 ### 🚀 Claude Code Integration: Transform Your Development Workflow!
 
 <details>
-<summary><strong>NEW!! AST‑Aware Code Chunking</strong></summary>
+<summary><strong>AST‑Aware Code Chunking</strong></summary>
 
 LEANN features intelligent code chunking that preserves semantic boundaries (functions, classes, methods) for Python, Java, C#, and TypeScript, improving code understanding compared to text-based chunking.
 

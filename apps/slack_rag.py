@@ -78,6 +78,20 @@ class SlackMCPRAG(BaseRAGExample):
             help="Test MCP server connection and list available tools without indexing",
         )
 
+        parser.add_argument(
+            "--max-retries",
+            type=int,
+            default=5,
+            help="Maximum number of retries for failed operations (default: 5)",
+        )
+
+        parser.add_argument(
+            "--retry-delay",
+            type=float,
+            default=2.0,
+            help="Initial delay between retries in seconds (default: 2.0)",
+        )
+
     async def test_mcp_connection(self, args) -> bool:
         """Test the MCP server connection and display available tools."""
         print(f"Testing connection to MCP server: {args.mcp_server}")
@@ -88,12 +102,14 @@ class SlackMCPRAG(BaseRAGExample):
                 workspace_name=args.workspace_name,
                 concatenate_conversations=not args.no_concatenate_conversations,
                 max_messages_per_conversation=args.max_messages_per_channel,
+                max_retries=args.max_retries,
+                retry_delay=args.retry_delay,
             )
 
             async with reader:
                 tools = await reader.list_available_tools()
 
-                print("\n✅ Successfully connected to MCP server!")
+                print("Successfully connected to MCP server!")
                 print(f"Available tools ({len(tools)}):")
 
                 for i, tool in enumerate(tools, 1):
@@ -115,7 +131,7 @@ class SlackMCPRAG(BaseRAGExample):
                 return True
 
         except Exception as e:
-            print(f"\n❌ Failed to connect to MCP server: {e}")
+            print(f"Failed to connect to MCP server: {e}")
             print("\nTroubleshooting tips:")
             print("1. Make sure the MCP server is installed and accessible")
             print("2. Check if the server command is correct")
@@ -146,18 +162,20 @@ class SlackMCPRAG(BaseRAGExample):
                 workspace_name=args.workspace_name,
                 concatenate_conversations=concatenate,
                 max_messages_per_conversation=args.max_messages_per_channel,
+                max_retries=args.max_retries,
+                retry_delay=args.retry_delay,
             )
 
             texts = await reader.read_slack_data(channels=args.channels)
 
             if not texts:
-                print("❌ No messages found! This could mean:")
+                print("No messages found! This could mean:")
                 print("- The MCP server couldn't fetch messages")
                 print("- The specified channels don't exist or are empty")
                 print("- Authentication issues with the Slack workspace")
                 return []
 
-            print(f"✅ Successfully loaded {len(texts)} text chunks from Slack")
+            print(f"Successfully loaded {len(texts)} text chunks from Slack")
 
             # Show sample of what was loaded
             if texts:
@@ -170,7 +188,7 @@ class SlackMCPRAG(BaseRAGExample):
             return texts
 
         except Exception as e:
-            print(f"❌ Error loading Slack data: {e}")
+            print(f"Error loading Slack data: {e}")
             print("\nThis might be due to:")
             print("- MCP server connection issues")
             print("- Authentication problems")
@@ -188,7 +206,7 @@ class SlackMCPRAG(BaseRAGExample):
             if not success:
                 return
             print(
-                "\n🎉 MCP server is working! You can now run without --test-connection to start indexing."
+                "MCP server is working! You can now run without --test-connection to start indexing."
             )
             return
 
