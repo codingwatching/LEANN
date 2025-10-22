@@ -254,6 +254,11 @@ Examples:
             action="store_true",
             help="Non-interactive mode: automatically select index without prompting",
         )
+        search_parser.add_argument(
+            "--show-metadata",
+            action="store_true",
+            help="Display file paths and metadata in search results",
+        )
 
         # Ask command
         ask_parser = subparsers.add_parser("ask", help="Ask questions")
@@ -1261,7 +1266,7 @@ Examples:
                 from .chunking_utils import create_text_chunks
 
                 # Use enhanced chunking with AST support
-                all_texts = create_text_chunks(
+                chunk_texts = create_text_chunks(
                     documents,
                     chunk_size=self.node_parser.chunk_size,
                     chunk_overlap=self.node_parser.chunk_overlap,
@@ -1271,6 +1276,17 @@ Examples:
                     code_file_extensions=None,  # Use defaults
                     ast_fallback_traditional=getattr(args, "ast_fallback_traditional", True),
                 )
+
+                # Note: AST chunking currently returns plain text chunks without metadata
+                # We preserve basic file info by associating chunks with their source documents
+                # For better metadata preservation, documents list order should be maintained
+                for chunk_text in chunk_texts:
+                    # TODO: Enhance create_text_chunks to return metadata alongside text
+                    # For now, we store chunks with empty metadata
+                    all_texts.append({
+                        "text": chunk_text,
+                        "metadata": {}
+                    })
 
             except ImportError as e:
                 print(
@@ -1283,14 +1299,30 @@ Examples:
             for doc in tqdm(documents, desc="Chunking documents", unit="doc"):
                 # Check if this is a code file based on source path
                 source_path = doc.metadata.get("source", "")
+                file_path = doc.metadata.get("file_path", "")
                 is_code_file = any(source_path.endswith(ext) for ext in code_file_exts)
+
+                # Extract metadata to preserve with chunks
+                chunk_metadata = {
+                    "file_path": file_path or source_path,
+                    "file_name": doc.metadata.get("file_name", ""),
+                }
+
+                # Add optional metadata if available
+                if "creation_date" in doc.metadata:
+                    chunk_metadata["creation_date"] = doc.metadata["creation_date"]
+                if "last_modified_date" in doc.metadata:
+                    chunk_metadata["last_modified_date"] = doc.metadata["last_modified_date"]
 
                 # Use appropriate parser based on file type
                 parser = self.code_parser if is_code_file else self.node_parser
                 nodes = parser.get_nodes_from_documents([doc])
 
                 for node in nodes:
-                    all_texts.append(node.get_content())
+                    all_texts.append({
+                        "text": node.get_content(),
+                        "metadata": chunk_metadata
+                    })
 
         print(f"Loaded {len(documents)} documents, {len(all_texts)} chunks")
         return all_texts
@@ -1365,7 +1397,7 @@ Examples:
 
         index_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"Building index '{index_name}' with {args.backend} backend...")
+        print(f"Building index '{index_name}' with {args.backend_name} backend...")
 
         embedding_options: dict[str, Any] = {}
         if args.embedding_mode == "ollama":
@@ -1377,7 +1409,7 @@ Examples:
                 embedding_options["api_key"] = resolved_embedding_key
 
         builder = LeannBuilder(
-            backend_name=args.backend,
+            backend_name=args.backend_name,
             embedding_model=args.embedding_model,
             embedding_mode=args.embedding_mode,
             embedding_options=embedding_options or None,
@@ -1388,8 +1420,8 @@ Examples:
             num_threads=args.num_threads,
         )
 
-        for chunk_text in all_texts:
-            builder.add_text(chunk_text)
+        for chunk in all_texts:
+            builder.add_text(chunk["text"], metadata=chunk["metadata"])
 
         builder.build_index(index_path)
         print(f"Index built at {index_path}")
@@ -1510,6 +1542,23 @@ Examples:
         print(f"Search results for '{query}' (top {len(results)}):")
         for i, result in enumerate(results, 1):
             print(f"{i}. Score: {result.score:.3f}")
+
+            # Display metadata if flag is set
+            if args.show_metadata and result.metadata:
+                file_path = result.metadata.get("file_path", "")
+                if file_path:
+                    print(f"   📄 File: {file_path}")
+
+                file_name = result.metadata.get("file_name", "")
+                if file_name and file_name != file_path:
+                    print(f"   📝 Name: {file_name}")
+
+                # Show timestamps if available
+                if "creation_date" in result.metadata:
+                    print(f"   🕐 Created: {result.metadata['creation_date']}")
+                if "last_modified_date" in result.metadata:
+                    print(f"   🕑 Modified: {result.metadata['last_modified_date']}")
+
             print(f"   {result.text[:200]}...")
             print()
 

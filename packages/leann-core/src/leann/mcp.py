@@ -60,6 +60,11 @@ def handle_request(request):
                                     "maximum": 128,
                                     "description": "Search complexity level. Use 16-32 for fast searches (recommended), 64+ for higher precision when needed.",
                                 },
+                                "show_metadata": {
+                                    "type": "boolean",
+                                    "default": False,
+                                    "description": "Include file paths and metadata in search results. Useful for understanding which files contain the results.",
+                                },
                             },
                             "required": ["index_name", "query"],
                         },
@@ -104,6 +109,8 @@ def handle_request(request):
                     f"--complexity={args.get('complexity', 32)}",
                     "--non-interactive",
                 ]
+                if args.get("show_metadata", False):
+                    cmd.append("--show-metadata")
                 result = subprocess.run(cmd, capture_output=True, text=True)
 
             elif tool_name == "leann_list":
