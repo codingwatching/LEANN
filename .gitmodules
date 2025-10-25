@@ -3,7 +3,8 @@
 	url = https://github.com/yichuan-w/DiskANN.git
 [submodule "packages/leann-backend-hnsw/third_party/faiss"]
 	path = packages/leann-backend-hnsw/third_party/faiss
-	url = https://github.com/yichuan-w/faiss.git
+	url = https://github.com/ww2283/faiss.git
+	branch = fix/zmq-linking
 [submodule "packages/leann-backend-hnsw/third_party/msgpack-c"]
 	path = packages/leann-backend-hnsw/third_party/msgpack-c
 	url = https://github.com/msgpack/msgpack-c.git
