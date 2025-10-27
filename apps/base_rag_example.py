@@ -180,14 +180,14 @@ class BaseRAGExample(ABC):
         ast_group.add_argument(
             "--ast-chunk-size",
             type=int,
-            default=512,
-            help="Maximum characters per AST chunk (default: 512)",
+            default=300,
+            help="Maximum CHARACTERS per AST chunk (default: 300). Final chunks may be larger due to overlap. For 512 token models: recommended 300 chars",
         )
         ast_group.add_argument(
             "--ast-chunk-overlap",
             type=int,
             default=64,
-            help="Overlap between AST chunks (default: 64)",
+            help="Overlap between AST chunks in CHARACTERS (default: 64). Added to chunk size, not included in it",
         )
         ast_group.add_argument(
             "--code-file-extensions",

@@ -181,25 +181,25 @@ Examples:
             "--doc-chunk-size",
             type=int,
             default=256,
-            help="Document chunk size in tokens/characters (default: 256)",
+            help="Document chunk size in TOKENS (default: 256). Final chunks may be larger due to overlap. For 512 token models: recommended 350 tokens (350 + 128 overlap = 478 max)",
         )
         build_parser.add_argument(
             "--doc-chunk-overlap",
             type=int,
             default=128,
-            help="Document chunk overlap (default: 128)",
+            help="Document chunk overlap in TOKENS (default: 128). Added to chunk size, not included in it",
         )
         build_parser.add_argument(
             "--code-chunk-size",
             type=int,
             default=512,
-            help="Code chunk size in tokens/lines (default: 512)",
+            help="Code chunk size in TOKENS (default: 512). Final chunks may be larger due to overlap. For 512 token models: recommended 400 tokens (400 + 50 overlap = 450 max)",
         )
         build_parser.add_argument(
             "--code-chunk-overlap",
             type=int,
             default=50,
-            help="Code chunk overlap (default: 50)",
+            help="Code chunk overlap in TOKENS (default: 50). Added to chunk size, not included in it",
         )
         build_parser.add_argument(
             "--use-ast-chunking",
@@ -209,14 +209,14 @@ Examples:
         build_parser.add_argument(
             "--ast-chunk-size",
             type=int,
-            default=768,
-            help="AST chunk size in characters (default: 768)",
+            default=300,
+            help="AST chunk size in CHARACTERS (non-whitespace) (default: 300). Final chunks may be larger due to overlap and expansion. For 512 token models: recommended 300 chars (300 + 64 overlap ~= 480 tokens)",
         )
         build_parser.add_argument(
             "--ast-chunk-overlap",
             type=int,
-            default=96,
-            help="AST chunk overlap in characters (default: 96)",
+            default=64,
+            help="AST chunk overlap in CHARACTERS (default: 64). Added to chunk size, not included in it. ~1.2 tokens per character for code",
         )
         build_parser.add_argument(
             "--ast-fallback-traditional",

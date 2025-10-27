@@ -11,6 +11,119 @@ from llama_index.core.node_parser import SentenceSplitter
 
 logger = logging.getLogger(__name__)
 
+
+def estimate_token_count(text: str) -> int:
+    """
+    Estimate token count for a text string.
+    Uses conservative estimation: ~4 characters per token for natural text,
+    ~1.2 tokens per character for code (worse tokenization).
+
+    Args:
+        text: Input text to estimate tokens for
+
+    Returns:
+        Estimated token count
+    """
+    try:
+        import tiktoken
+
+        encoder = tiktoken.get_encoding("cl100k_base")
+        return len(encoder.encode(text))
+    except ImportError:
+        # Fallback: Conservative character-based estimation
+        # Assume worst case for code: 1.2 tokens per character
+        return int(len(text) * 1.2)
+
+
+def calculate_safe_chunk_size(
+    model_token_limit: int,
+    overlap_tokens: int,
+    chunking_mode: str = "traditional",
+    safety_factor: float = 0.9,
+) -> int:
+    """
+    Calculate safe chunk size accounting for overlap and safety margin.
+
+    Args:
+        model_token_limit: Maximum tokens supported by embedding model
+        overlap_tokens: Overlap size (tokens for traditional, chars for AST)
+        chunking_mode: "traditional" (tokens) or "ast" (characters)
+        safety_factor: Safety margin (0.9 = 10% safety margin)
+
+    Returns:
+        Safe chunk size: tokens for traditional, characters for AST
+    """
+    safe_limit = int(model_token_limit * safety_factor)
+
+    if chunking_mode == "traditional":
+        # Traditional chunking uses tokens
+        # Max chunk = chunk_size + overlap, so chunk_size = limit - overlap
+        return max(1, safe_limit - overlap_tokens)
+    else:  # AST chunking
+        # AST uses characters, need to convert
+        # Conservative estimate: 1.2 tokens per char for code
+        overlap_chars = int(overlap_tokens * 3)  # ~3 chars per token for code
+        safe_chars = int(safe_limit / 1.2)
+        return max(1, safe_chars - overlap_chars)
+
+
+def validate_chunk_token_limits(chunks: list[str], max_tokens: int = 512) -> tuple[list[str], int]:
+    """
+    Validate that chunks don't exceed token limits and truncate if necessary.
+
+    Args:
+        chunks: List of text chunks to validate
+        max_tokens: Maximum tokens allowed per chunk
+
+    Returns:
+        Tuple of (validated_chunks, num_truncated)
+    """
+    validated_chunks = []
+    num_truncated = 0
+
+    for i, chunk in enumerate(chunks):
+        estimated_tokens = estimate_token_count(chunk)
+
+        if estimated_tokens > max_tokens:
+            # Truncate chunk to fit token limit
+            try:
+                import tiktoken
+
+                encoder = tiktoken.get_encoding("cl100k_base")
+                tokens = encoder.encode(chunk)
+                if len(tokens) > max_tokens:
+                    truncated_tokens = tokens[:max_tokens]
+                    truncated_chunk = encoder.decode(truncated_tokens)
+                    validated_chunks.append(truncated_chunk)
+                    num_truncated += 1
+                    logger.warning(
+                        f"Truncated chunk {i} from {len(tokens)} to {max_tokens} tokens "
+                        f"(from {len(chunk)} to {len(truncated_chunk)} characters)"
+                    )
+                else:
+                    validated_chunks.append(chunk)
+            except ImportError:
+                # Fallback: Conservative character truncation
+                char_limit = int(max_tokens / 1.2)  # Conservative for code
+                if len(chunk) > char_limit:
+                    truncated_chunk = chunk[:char_limit]
+                    validated_chunks.append(truncated_chunk)
+                    num_truncated += 1
+                    logger.warning(
+                        f"Truncated chunk {i} from {len(chunk)} to {char_limit} characters "
+                        f"(conservative estimate for {max_tokens} tokens)"
+                    )
+                else:
+                    validated_chunks.append(chunk)
+        else:
+            validated_chunks.append(chunk)
+
+    if num_truncated > 0:
+        logger.warning(f"Truncated {num_truncated}/{len(chunks)} chunks to fit token limits")
+
+    return validated_chunks, num_truncated
+
+
 # Code file extensions supported by astchunk
 CODE_EXTENSIONS = {
     ".py": "python",
@@ -82,6 +195,17 @@ def create_ast_chunks(
             continue
 
         try:
+            # Warn if AST chunk size + overlap might exceed common token limits
+            estimated_max_tokens = int(
+                (max_chunk_size + chunk_overlap) * 1.2
+            )  # Conservative estimate
+            if estimated_max_tokens > 512:
+                logger.warning(
+                    f"AST chunk size ({max_chunk_size}) + overlap ({chunk_overlap}) = {max_chunk_size + chunk_overlap} chars "
+                    f"may exceed 512 token limit (~{estimated_max_tokens} tokens estimated). "
+                    f"Consider reducing --ast-chunk-size to {int(400 / 1.2)} or --ast-chunk-overlap to {int(50 / 1.2)}"
+                )
+
             configs = {
                 "max_chunk_size": max_chunk_size,
                 "language": language,
@@ -217,4 +341,14 @@ def create_text_chunks(
         all_chunks = create_traditional_chunks(documents, chunk_size, chunk_overlap)
 
     logger.info(f"Total chunks created: {len(all_chunks)}")
-    return all_chunks
+
+    # Validate chunk token limits (default to 512 for safety)
+    # This provides a safety net for embedding models with token limits
+    validated_chunks, num_truncated = validate_chunk_token_limits(all_chunks, max_tokens=512)
+
+    if num_truncated > 0:
+        logger.info(
+            f"Post-chunking validation: {num_truncated} chunks were truncated to fit 512 token limit"
+        )
+
+    return validated_chunks
