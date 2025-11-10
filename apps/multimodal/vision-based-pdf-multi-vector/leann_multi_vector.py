@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -194,7 +195,7 @@ def _embed_images(model, processor, images: list[Image.Image]) -> list[Any]:
 
     dataloader = DataLoader(
         dataset=ListDataset[Image.Image](images),
-        batch_size=1,
+        batch_size=32,
         shuffle=False,
         collate_fn=lambda x: processor.process_images(x),
     )
@@ -678,11 +679,15 @@ class LeannMultiVector:
             return (float(score), doc_id)
 
         scores: list[tuple[float, int]] = []
+        # load and core time
+        start_time = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(_score_one, doc_id) for doc_id in candidate_doc_ids]
             for fut in concurrent.futures.as_completed(futures):
                 scores.append(fut.result())
-
+        end_time = time.time()
+        print(f"Number of candidate doc ids: {len(candidate_doc_ids)}")
+        print(f"Time taken in load and core time: {end_time - start_time} seconds")
         scores.sort(key=lambda x: x[0], reverse=True)
         return scores[:topk] if len(scores) >= topk else scores
 
@@ -710,7 +715,6 @@ class LeannMultiVector:
         emb_path = self._embeddings_path()
         if not emb_path.exists():
             return self.search(data, topk)
-
         all_embeddings = np.load(emb_path, mmap_mode="r")
         if all_embeddings.dtype != np.float32:
             all_embeddings = all_embeddings.astype(np.float32)
@@ -718,23 +722,29 @@ class LeannMultiVector:
         assert self._docid_to_indices is not None
         candidate_doc_ids = list(self._docid_to_indices.keys())
 
-        def _score_one(doc_id: int) -> tuple[float, int]:
+        def _score_one(doc_id: int, _all_embeddings=all_embeddings) -> tuple[float, int]:
             token_indices = self._docid_to_indices.get(doc_id, [])
             if not token_indices:
                 return (0.0, doc_id)
-            doc_vecs = np.asarray(all_embeddings[token_indices], dtype=np.float32)
+            doc_vecs = np.asarray(_all_embeddings[token_indices], dtype=np.float32)
             sim = np.dot(data, doc_vecs.T)
             sim = np.nan_to_num(sim, nan=-1e30, posinf=1e30, neginf=-1e30)
             score = sim.max(axis=2).sum(axis=1) if sim.ndim == 3 else sim.max(axis=1).sum()
             return (float(score), doc_id)
 
         scores: list[tuple[float, int]] = []
+        # load and core time
+        start_time = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(_score_one, d) for d in candidate_doc_ids]
             for fut in concurrent.futures.as_completed(futures):
                 scores.append(fut.result())
-
+        end_time = time.time()
+        # print number of candidate doc ids
+        print(f"Number of candidate doc ids: {len(candidate_doc_ids)}")
+        print(f"Time taken in load and core time: {end_time - start_time} seconds")
         scores.sort(key=lambda x: x[0], reverse=True)
+        del all_embeddings
         return scores[:topk] if len(scores) >= topk else scores
 
     def get_image(self, doc_id: int) -> Optional[Image.Image]:
