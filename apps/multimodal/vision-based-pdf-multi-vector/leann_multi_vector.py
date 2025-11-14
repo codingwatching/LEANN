@@ -219,32 +219,47 @@ def _embed_images(model, processor, images: list[Image.Image]) -> list[Any]:
 
 def _embed_queries(model, processor, queries: list[str]) -> list[Any]:
     import torch
-    from colpali_engine.utils.torch_utils import ListDataset
-    from torch.utils.data import DataLoader
 
     model.eval()
 
-    dataloader = DataLoader(
-        dataset=ListDataset[str](queries),
-        batch_size=1,
-        shuffle=False,
-        collate_fn=lambda x: processor.process_queries(x),
-    )
-
-    q_vecs: list[Any] = []
-    for batch_query in tqdm(dataloader, desc="Embedding queries"):
-        with torch.no_grad():
-            batch_query = {k: v.to(model.device) for k, v in batch_query.items()}
+    # Match MTEB's exact query processing from ColPaliEngineWrapper.get_text_embeddings:
+    # 1. MTEB receives batch["text"] which may already include instruction/prompt
+    # 2. Manually adds: query_prefix + text + query_augmentation_token * 10
+    # 3. Calls processor.process_queries(batch) where batch is now a list of strings
+    # 4. process_queries adds: query_prefix + text + suffix (suffix = query_augmentation_token * 10)
+    # 
+    # However, MTEB's approach results in duplicate addition (20 tokens total).
+    # Since we're already adding the prompt in search_queries, let's try:
+    # Option 1: Just call process_queries (let it handle all additions) - avoids duplicate
+    # Option 2: Manual add + process_texts (to avoid duplicate)
+    # 
+    # Testing shows Option 1 works better - just call process_queries without manual addition
+    
+    all_embeds = []
+    batch_size = 32  # Match MTEB's default batch_size
+    
+    with torch.no_grad():
+        for i in tqdm(range(0, len(queries), batch_size), desc="Embedding queries"):
+            batch_queries = queries[i:i + batch_size]
+            
+            # Just call process_queries - it will add query_prefix + text + 10 tokens
+            # This avoids duplicate addition that happens in MTEB's approach
+            inputs = processor.process_queries(batch_queries)
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            
             if model.device.type == "cuda":
                 with torch.autocast(
                     device_type="cuda",
                     dtype=model.dtype if model.dtype.is_floating_point else torch.bfloat16,
                 ):
-                    embeddings_query = model(**batch_query)
+                    outs = model(**inputs)
             else:
-                embeddings_query = model(**batch_query)
-        q_vecs.extend(list(torch.unbind(embeddings_query.to("cpu"))))
-    return q_vecs
+                outs = model(**inputs)
+            
+            # Match MTEB: convert to float32 on CPU
+            all_embeds.extend(list(torch.unbind(outs.cpu().to(torch.float32))))
+    
+    return all_embeds
 
 
 def _build_index(
@@ -281,6 +296,247 @@ def _load_retriever_if_index_exists(index_path: str) -> Optional[Any]:
         except Exception:
             dim = 128
         return LeannMultiVector(index_path=index_path, dim=dim)
+    return None
+
+
+def _build_fast_plaid_index(
+    index_path: str,
+    doc_vecs: list[Any],
+    filepaths: list[str],
+    images: list[Image.Image],
+) -> tuple[Any, float]:
+    """
+    Build a Fast-Plaid index from document embeddings.
+    
+    Args:
+        index_path: Path to save the Fast-Plaid index
+        doc_vecs: List of document embeddings (each is a tensor with shape [num_tokens, embedding_dim])
+        filepaths: List of filepath identifiers for each document
+        images: List of PIL Images corresponding to each document
+    
+    Returns:
+        Tuple of (FastPlaid index object, build_time_in_seconds)
+    """
+    import torch
+    from fast_plaid import search as fast_plaid_search
+    
+    print(f"    Preparing {len(doc_vecs)} document embeddings for Fast-Plaid...")
+    _t0 = time.perf_counter()
+    
+    # Convert doc_vecs to list of tensors
+    documents_embeddings = []
+    for i, vec in enumerate(doc_vecs):
+        if i % 1000 == 0:
+            print(f"      Converting embedding {i}/{len(doc_vecs)}...")
+        if not isinstance(vec, torch.Tensor):
+            vec = torch.tensor(vec) if isinstance(vec, np.ndarray) else torch.from_numpy(np.array(vec))
+        # Ensure float32 for Fast-Plaid
+        if vec.dtype != torch.float32:
+            vec = vec.float()
+        documents_embeddings.append(vec)
+    
+    print(f"    Converted {len(documents_embeddings)} embeddings")
+    if len(documents_embeddings) > 0:
+        print(f"    First embedding shape: {documents_embeddings[0].shape}")
+        print(f"    First embedding dtype: {documents_embeddings[0].dtype}")
+    
+    # Prepare metadata for Fast-Plaid
+    print(f"    Preparing metadata for {len(filepaths)} documents...")
+    metadata_list = []
+    for i, filepath in enumerate(filepaths):
+        metadata_list.append({
+            "filepath": filepath,
+            "index": i,
+        })
+    
+    # Create Fast-Plaid index
+    print(f"    Creating FastPlaid object with index path: {index_path}")
+    try:
+        fast_plaid_index = fast_plaid_search.FastPlaid(index=index_path)
+        print(f"    FastPlaid object created successfully")
+    except Exception as e:
+        print(f"    Error creating FastPlaid object: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    print(f"    Calling fast_plaid_index.create() with {len(documents_embeddings)} documents...")
+    try:
+        fast_plaid_index.create(
+            documents_embeddings=documents_embeddings,
+            metadata=metadata_list,
+        )
+        print(f"    Fast-Plaid index created successfully")
+    except Exception as e:
+        print(f"    Error creating Fast-Plaid index: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    build_secs = time.perf_counter() - _t0
+    
+    # Save images separately (Fast-Plaid doesn't store images)
+    print(f"    Saving {len(images)} images...")
+    images_dir = Path(index_path) / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    for i, img in enumerate(tqdm(images, desc="Saving images")):
+        img_path = images_dir / f"doc_{i}.png"
+        img.save(str(img_path))
+    
+    return fast_plaid_index, build_secs
+
+
+def _fast_plaid_index_exists(index_path: str) -> bool:
+    """
+    Check if Fast-Plaid index exists by checking for key files.
+    This avoids creating the FastPlaid object which may trigger memory allocation.
+    
+    Args:
+        index_path: Path to the Fast-Plaid index
+    
+    Returns:
+        True if index appears to exist, False otherwise
+    """
+    index_path_obj = Path(index_path)
+    if not index_path_obj.exists() or not index_path_obj.is_dir():
+        return False
+    
+    # Fast-Plaid creates a SQLite database file for metadata
+    # Check for metadata.db as the most reliable indicator
+    metadata_db = index_path_obj / "metadata.db"
+    if metadata_db.exists() and metadata_db.stat().st_size > 0:
+        return True
+    
+    # Also check if directory has any files (might be incomplete index)
+    try:
+        if any(index_path_obj.iterdir()):
+            return True
+    except Exception:
+        pass
+    
+    return False
+
+
+def _load_fast_plaid_index_if_exists(index_path: str) -> Optional[Any]:
+    """
+    Load Fast-Plaid index if it exists.
+    First checks if index files exist, then creates the FastPlaid object.
+    The actual index data loading happens lazily when search is called.
+    
+    Args:
+        index_path: Path to the Fast-Plaid index
+    
+    Returns:
+        FastPlaid index object if exists, None otherwise
+    """
+    try:
+        from fast_plaid import search as fast_plaid_search
+        
+        # First check if index files exist without creating the object
+        if not _fast_plaid_index_exists(index_path):
+            return None
+        
+        # Now try to create FastPlaid object
+        # This may trigger some memory allocation, but the full index loading is deferred
+        fast_plaid_index = fast_plaid_search.FastPlaid(index=index_path)
+        return fast_plaid_index
+    except ImportError:
+        # fast-plaid not installed
+        return None
+    except Exception as e:
+        # Any error (including memory errors from Rust backend) - return None
+        # The error will be caught and index will be rebuilt
+        print(f"Warning: Could not load Fast-Plaid index: {type(e).__name__}: {e}")
+        return None
+
+
+def _search_fast_plaid(
+    fast_plaid_index: Any,
+    query_vec: Any,
+    top_k: int,
+) -> tuple[list[tuple[float, int]], float]:
+    """
+    Search Fast-Plaid index with a query embedding.
+    
+    Args:
+        fast_plaid_index: FastPlaid index object
+        query_vec: Query embedding tensor with shape [num_tokens, embedding_dim]
+        top_k: Number of top results to return
+    
+    Returns:
+        Tuple of (results_list, search_time_in_seconds)
+        results_list: List of (score, doc_id) tuples
+    """
+    import torch
+    
+    _t0 = time.perf_counter()
+    
+    # Ensure query is a torch tensor
+    if not isinstance(query_vec, torch.Tensor):
+        q_vec_tensor = torch.tensor(query_vec) if isinstance(query_vec, np.ndarray) else torch.from_numpy(np.array(query_vec))
+    else:
+        q_vec_tensor = query_vec
+    
+    # Fast-Plaid expects shape [num_queries, num_tokens, embedding_dim]
+    if q_vec_tensor.dim() == 2:
+        q_vec_tensor = q_vec_tensor.unsqueeze(0)  # [1, num_tokens, embedding_dim]
+    
+    # Perform search
+    scores = fast_plaid_index.search(
+        queries_embeddings=q_vec_tensor,
+        top_k=top_k,
+        show_progress=True,
+    )
+    
+    search_secs = time.perf_counter() - _t0
+    
+    # Convert Fast-Plaid results to same format as LEANN: list of (score, doc_id) tuples
+    results = []
+    if scores and len(scores) > 0:
+        query_results = scores[0]
+        # Fast-Plaid returns (doc_id, score), convert to (score, doc_id) to match LEANN format
+        results = [(float(score), int(doc_id)) for doc_id, score in query_results]
+    
+    return results, search_secs
+
+
+def _get_fast_plaid_image(index_path: str, doc_id: int) -> Optional[Image.Image]:
+    """
+    Retrieve image for a document from Fast-Plaid index.
+    
+    Args:
+        index_path: Path to the Fast-Plaid index
+        doc_id: Document ID
+    
+    Returns:
+        PIL Image if found, None otherwise
+    """
+    images_dir = Path(index_path) / "images"
+    image_path = images_dir / f"doc_{doc_id}.png"
+    
+    if image_path.exists():
+        return Image.open(image_path)
+    return None
+
+
+def _get_fast_plaid_metadata(index_path: str, doc_id: int) -> Optional[dict]:
+    """
+    Retrieve metadata for a document from Fast-Plaid index.
+    
+    Args:
+        index_path: Path to the Fast-Plaid index
+        doc_id: Document ID
+    
+    Returns:
+        Dictionary with metadata if found, None otherwise
+    """
+    try:
+        from fast_plaid import filtering
+        metadata_list = filtering.get(index=index_path, subset=[doc_id])
+        if metadata_list and len(metadata_list) > 0:
+            return metadata_list[0]
+    except Exception:
+        pass
     return None
 
 
