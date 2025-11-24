@@ -13,7 +13,7 @@ import os
 import time
 from pathlib import Path
 
-from leann.api import LeannBuilder, LeannSearcher
+from leann.api import LeannBuilder, LeannSearcher, SearchResult
 
 os.environ["LEANN_LOG_LEVEL"] = "DEBUG"
 
@@ -87,7 +87,7 @@ def test_search_performance():
     print("\n  Test 1: Default complexity (64) `1 ")
     print(f"    Query: '{test_query}'")
     start_time = time.time()
-    results = searcher.search(test_query, top_k=10, complexity=64)
+    results: list[SearchResult] = searcher.search(test_query, top_k=10, complexity=64)
     search_time = time.time() - start_time
     print(f"    ✓ Search completed in {search_time:.2f} seconds")
     print(f"    Results: {len(results)} items")
