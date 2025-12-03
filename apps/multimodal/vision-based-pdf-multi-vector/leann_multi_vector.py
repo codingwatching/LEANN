@@ -227,28 +227,26 @@ def _embed_queries(model, processor, queries: list[str]) -> list[Any]:
     # 2. Manually adds: query_prefix + text + query_augmentation_token * 10
     # 3. Calls processor.process_queries(batch) where batch is now a list of strings
     # 4. process_queries adds: query_prefix + text + suffix (suffix = query_augmentation_token * 10)
-    # 
+    #
     # This results in duplicate addition: query_prefix is added twice, query_augmentation_token * 20 total
     # We need to match this exactly to reproduce MTEB results
-    
+
     all_embeds = []
     batch_size = 32  # Match MTEB's default batch_size
-    
+
     with torch.no_grad():
         for i in tqdm(range(0, len(queries), batch_size), desc="Embedding queries"):
-            batch_queries = queries[i:i + batch_size]
-            
+            batch_queries = queries[i : i + batch_size]
+
             # Match MTEB: manually add query_prefix + text + query_augmentation_token * 10
             # Then process_queries will add them again (resulting in 20 augmentation tokens total)
             batch = [
-                processor.query_prefix
-                + t
-                + processor.query_augmentation_token * 10
+                processor.query_prefix + t + processor.query_augmentation_token * 10
                 for t in batch_queries
             ]
             inputs = processor.process_queries(batch)
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
-            
+
             if model.device.type == "cuda":
                 with torch.autocast(
                     device_type="cuda",
@@ -257,10 +255,10 @@ def _embed_queries(model, processor, queries: list[str]) -> list[Any]:
                     outs = model(**inputs)
             else:
                 outs = model(**inputs)
-            
+
             # Match MTEB: convert to float32 on CPU
             all_embeds.extend(list(torch.unbind(outs.cpu().to(torch.float32))))
-    
+
     return all_embeds
 
 
@@ -309,74 +307,82 @@ def _build_fast_plaid_index(
 ) -> tuple[Any, float]:
     """
     Build a Fast-Plaid index from document embeddings.
-    
+
     Args:
         index_path: Path to save the Fast-Plaid index
         doc_vecs: List of document embeddings (each is a tensor with shape [num_tokens, embedding_dim])
         filepaths: List of filepath identifiers for each document
         images: List of PIL Images corresponding to each document
-    
+
     Returns:
         Tuple of (FastPlaid index object, build_time_in_seconds)
     """
     import torch
     from fast_plaid import search as fast_plaid_search
-    
+
     print(f"    Preparing {len(doc_vecs)} document embeddings for Fast-Plaid...")
     _t0 = time.perf_counter()
-    
+
     # Convert doc_vecs to list of tensors
     documents_embeddings = []
     for i, vec in enumerate(doc_vecs):
         if i % 1000 == 0:
             print(f"      Converting embedding {i}/{len(doc_vecs)}...")
         if not isinstance(vec, torch.Tensor):
-            vec = torch.tensor(vec) if isinstance(vec, np.ndarray) else torch.from_numpy(np.array(vec))
+            vec = (
+                torch.tensor(vec)
+                if isinstance(vec, np.ndarray)
+                else torch.from_numpy(np.array(vec))
+            )
         # Ensure float32 for Fast-Plaid
         if vec.dtype != torch.float32:
             vec = vec.float()
         documents_embeddings.append(vec)
-    
+
     print(f"    Converted {len(documents_embeddings)} embeddings")
     if len(documents_embeddings) > 0:
         print(f"    First embedding shape: {documents_embeddings[0].shape}")
         print(f"    First embedding dtype: {documents_embeddings[0].dtype}")
-    
+
     # Prepare metadata for Fast-Plaid
     print(f"    Preparing metadata for {len(filepaths)} documents...")
     metadata_list = []
     for i, filepath in enumerate(filepaths):
-        metadata_list.append({
-            "filepath": filepath,
-            "index": i,
-        })
-    
+        metadata_list.append(
+            {
+                "filepath": filepath,
+                "index": i,
+            }
+        )
+
     # Create Fast-Plaid index
     print(f"    Creating FastPlaid object with index path: {index_path}")
     try:
         fast_plaid_index = fast_plaid_search.FastPlaid(index=index_path)
-        print(f"    FastPlaid object created successfully")
+        print("    FastPlaid object created successfully")
     except Exception as e:
         print(f"    Error creating FastPlaid object: {type(e).__name__}: {e}")
         import traceback
+
         traceback.print_exc()
         raise
-    
+
     print(f"    Calling fast_plaid_index.create() with {len(documents_embeddings)} documents...")
     try:
         fast_plaid_index.create(
             documents_embeddings=documents_embeddings,
             metadata=metadata_list,
         )
-        print(f"    Fast-Plaid index created successfully")
+        print("    Fast-Plaid index created successfully")
     except Exception as e:
         print(f"    Error creating Fast-Plaid index: {type(e).__name__}: {e}")
         import traceback
+
         traceback.print_exc()
         raise
-    
+
     build_secs = time.perf_counter() - _t0
-    
+
     # Save images separately (Fast-Plaid doesn't store images)
     print(f"    Saving {len(images)} images...")
     images_dir = Path(index_path) / "images"
@@ -384,7 +390,7 @@ def _build_fast_plaid_index(
     for i, img in enumerate(tqdm(images, desc="Saving images")):
         img_path = images_dir / f"doc_{i}.png"
         img.save(str(img_path))
-    
+
     return fast_plaid_index, build_secs
 
 
@@ -392,30 +398,30 @@ def _fast_plaid_index_exists(index_path: str) -> bool:
     """
     Check if Fast-Plaid index exists by checking for key files.
     This avoids creating the FastPlaid object which may trigger memory allocation.
-    
+
     Args:
         index_path: Path to the Fast-Plaid index
-    
+
     Returns:
         True if index appears to exist, False otherwise
     """
     index_path_obj = Path(index_path)
     if not index_path_obj.exists() or not index_path_obj.is_dir():
         return False
-    
+
     # Fast-Plaid creates a SQLite database file for metadata
     # Check for metadata.db as the most reliable indicator
     metadata_db = index_path_obj / "metadata.db"
     if metadata_db.exists() and metadata_db.stat().st_size > 0:
         return True
-    
+
     # Also check if directory has any files (might be incomplete index)
     try:
         if any(index_path_obj.iterdir()):
             return True
     except Exception:
         pass
-    
+
     return False
 
 
@@ -424,20 +430,20 @@ def _load_fast_plaid_index_if_exists(index_path: str) -> Optional[Any]:
     Load Fast-Plaid index if it exists.
     First checks if index files exist, then creates the FastPlaid object.
     The actual index data loading happens lazily when search is called.
-    
+
     Args:
         index_path: Path to the Fast-Plaid index
-    
+
     Returns:
         FastPlaid index object if exists, None otherwise
     """
     try:
         from fast_plaid import search as fast_plaid_search
-        
+
         # First check if index files exist without creating the object
         if not _fast_plaid_index_exists(index_path):
             return None
-        
+
         # Now try to create FastPlaid object
         # This may trigger some memory allocation, but the full index loading is deferred
         fast_plaid_index = fast_plaid_search.FastPlaid(index=index_path)
@@ -459,81 +465,105 @@ def _search_fast_plaid(
 ) -> tuple[list[tuple[float, int]], float]:
     """
     Search Fast-Plaid index with a query embedding.
-    
+
     Args:
         fast_plaid_index: FastPlaid index object
         query_vec: Query embedding tensor with shape [num_tokens, embedding_dim]
         top_k: Number of top results to return
-    
+
     Returns:
         Tuple of (results_list, search_time_in_seconds)
         results_list: List of (score, doc_id) tuples
     """
     import torch
-    
+
     _t0 = time.perf_counter()
-    
+
     # Ensure query is a torch tensor
     if not isinstance(query_vec, torch.Tensor):
-        q_vec_tensor = torch.tensor(query_vec) if isinstance(query_vec, np.ndarray) else torch.from_numpy(np.array(query_vec))
+        q_vec_tensor = (
+            torch.tensor(query_vec)
+            if isinstance(query_vec, np.ndarray)
+            else torch.from_numpy(np.array(query_vec))
+        )
     else:
         q_vec_tensor = query_vec
-    
+
     # Fast-Plaid expects shape [num_queries, num_tokens, embedding_dim]
     if q_vec_tensor.dim() == 2:
         q_vec_tensor = q_vec_tensor.unsqueeze(0)  # [1, num_tokens, embedding_dim]
-    
+
     # Perform search
     scores = fast_plaid_index.search(
         queries_embeddings=q_vec_tensor,
         top_k=top_k,
         show_progress=True,
     )
-    
+
     search_secs = time.perf_counter() - _t0
-    
+
     # Convert Fast-Plaid results to same format as LEANN: list of (score, doc_id) tuples
     results = []
     if scores and len(scores) > 0:
         query_results = scores[0]
         # Fast-Plaid returns (doc_id, score), convert to (score, doc_id) to match LEANN format
         results = [(float(score), int(doc_id)) for doc_id, score in query_results]
-    
+
     return results, search_secs
 
 
 def _get_fast_plaid_image(index_path: str, doc_id: int) -> Optional[Image.Image]:
     """
     Retrieve image for a document from Fast-Plaid index.
-    
+
     Args:
         index_path: Path to the Fast-Plaid index
-        doc_id: Document ID
-    
+        doc_id: Document ID returned by Fast-Plaid search
+
     Returns:
         PIL Image if found, None otherwise
+
+    Note: Uses metadata['index'] to get the actual file index, as Fast-Plaid
+    doc_id may differ from the file naming index.
     """
+    # First get metadata to find the actual index used for file naming
+    metadata = _get_fast_plaid_metadata(index_path, doc_id)
+    if metadata is None:
+        # Fallback: try using doc_id directly
+        file_index = doc_id
+    else:
+        # Use the 'index' field from metadata, which matches the file naming
+        file_index = metadata.get("index", doc_id)
+
     images_dir = Path(index_path) / "images"
-    image_path = images_dir / f"doc_{doc_id}.png"
-    
+    image_path = images_dir / f"doc_{file_index}.png"
+
     if image_path.exists():
         return Image.open(image_path)
+
+    # If not found with index, try doc_id as fallback
+    if file_index != doc_id:
+        fallback_path = images_dir / f"doc_{doc_id}.png"
+        if fallback_path.exists():
+            return Image.open(fallback_path)
+
     return None
 
 
 def _get_fast_plaid_metadata(index_path: str, doc_id: int) -> Optional[dict]:
     """
     Retrieve metadata for a document from Fast-Plaid index.
-    
+
     Args:
         index_path: Path to the Fast-Plaid index
         doc_id: Document ID
-    
+
     Returns:
         Dictionary with metadata if found, None otherwise
     """
     try:
         from fast_plaid import filtering
+
         metadata_list = filtering.get(index=index_path, subset=[doc_id])
         if metadata_list and len(metadata_list) > 0:
             return metadata_list[0]
@@ -1053,18 +1083,18 @@ class ViDoReBenchmarkEvaluator:
     A reusable class for evaluating ViDoRe benchmarks (v1 and v2).
     This class encapsulates common functionality for building indexes, searching, and evaluating.
     """
-    
+
     def __init__(
         self,
         model_name: str,
         use_fast_plaid: bool = False,
         top_k: int = 100,
         first_stage_k: int = 500,
-        k_values: list[int] = None,
+        k_values: Optional[list[int]] = None,
     ):
         """
         Initialize the evaluator.
-        
+
         Args:
             model_name: Model name ("colqwen2" or "colpali")
             use_fast_plaid: Whether to use Fast-Plaid instead of LEANN
@@ -1077,19 +1107,21 @@ class ViDoReBenchmarkEvaluator:
         self.top_k = top_k
         self.first_stage_k = first_stage_k
         self.k_values = k_values if k_values is not None else [1, 3, 5, 10, 100]
-        
+
         # Load model once (can be reused across tasks)
         self._model = None
         self._processor = None
         self._model_name_actual = None
-    
+
     def _load_model_if_needed(self):
         """Lazy load the model."""
         if self._model is None:
             print(f"\nLoading model: {self.model_name}")
-            self._model_name_actual, self._model, self._processor, _, _, _ = _load_colvision(self.model_name)
+            self._model_name_actual, self._model, self._processor, _, _, _ = _load_colvision(
+                self.model_name
+            )
             print(f"Model loaded: {self._model_name_actual}")
-    
+
     def build_index_from_corpus(
         self,
         corpus: dict[str, Image.Image],
@@ -1098,31 +1130,31 @@ class ViDoReBenchmarkEvaluator:
     ) -> tuple[Any, list[str]]:
         """
         Build index from corpus images.
-        
+
         Args:
             corpus: dict mapping corpus_id to PIL Image
             index_path: Path to save/load the index
             rebuild: Whether to rebuild even if index exists
-        
+
         Returns:
             tuple: (retriever or fast_plaid_index object, list of corpus_ids in order)
         """
         self._load_model_if_needed()
-        
+
         # Ensure consistent ordering
         corpus_ids = sorted(corpus.keys())
         images = [corpus[cid] for cid in corpus_ids]
-        
+
         if self.use_fast_plaid:
             # Check if Fast-Plaid index exists
             if not rebuild and _load_fast_plaid_index_if_exists(index_path) is not None:
                 print(f"Fast-Plaid index already exists at {index_path}")
                 return _load_fast_plaid_index_if_exists(index_path), corpus_ids
-            
+
             print(f"Building Fast-Plaid index at {index_path}...")
             print("Embedding images...")
             doc_vecs = _embed_images(self._model, self._processor, images)
-            
+
             fast_plaid_index, build_time = _build_fast_plaid_index(
                 index_path, doc_vecs, corpus_ids, images
             )
@@ -1135,15 +1167,15 @@ class ViDoReBenchmarkEvaluator:
                 if retriever is not None:
                     print(f"LEANN index already exists at {index_path}")
                     return retriever, corpus_ids
-            
+
             print(f"Building LEANN index at {index_path}...")
             print("Embedding images...")
             doc_vecs = _embed_images(self._model, self._processor, images)
-            
+
             retriever = _build_index(index_path, doc_vecs, corpus_ids, images)
-            print(f"LEANN index built")
+            print("LEANN index built")
             return retriever, corpus_ids
-    
+
     def search_queries(
         self,
         queries: dict[str, str],
@@ -1154,34 +1186,34 @@ class ViDoReBenchmarkEvaluator:
     ) -> dict[str, dict[str, float]]:
         """
         Search queries against the index.
-        
+
         Args:
             queries: dict mapping query_id to query text
             corpus_ids: list of corpus_ids in the same order as the index
             index_or_retriever: index or retriever object
             fast_plaid_index_path: path to Fast-Plaid index (for metadata)
             task_prompt: Optional dict with prompt for query (e.g., {"query": "..."})
-        
+
         Returns:
             results: dict mapping query_id to dict of {corpus_id: score}
         """
         self._load_model_if_needed()
-        
+
         print(f"Searching {len(queries)} queries (top_k={self.top_k})...")
-        
+
         query_ids = list(queries.keys())
         query_texts = [queries[qid] for qid in query_ids]
-        
+
         # Note: ColPaliEngineWrapper does NOT use task prompt from metadata
         # It uses query_prefix + text + query_augmentation_token (handled in _embed_queries)
         # So we don't append task_prompt here to match MTEB behavior
-        
+
         # Embed queries
         print("Embedding queries...")
         query_vecs = _embed_queries(self._model, self._processor, query_texts)
-        
+
         results = {}
-        
+
         for query_id, query_vec in zip(tqdm(query_ids, desc="Searching"), query_vecs):
             if self.use_fast_plaid:
                 # Fast-Plaid search
@@ -1194,47 +1226,51 @@ class ViDoReBenchmarkEvaluator:
             else:
                 # LEANN search
                 import torch
-                query_np = query_vec.float().numpy() if isinstance(query_vec, torch.Tensor) else query_vec
-                search_results = index_or_retriever.search_exact_all(query_np, topk=self.top_k)
+
+                query_np = (
+                    query_vec.float().numpy() if isinstance(query_vec, torch.Tensor) else query_vec
+                )
+                search_results = index_or_retriever.search_exact(query_np, topk=self.top_k)
                 query_results = {}
                 for score, doc_id in search_results:
                     if doc_id < len(corpus_ids):
                         corpus_id = corpus_ids[doc_id]
                         query_results[corpus_id] = float(score)
-            
+
             results[query_id] = query_results
-        
+
         return results
-    
+
     @staticmethod
     def evaluate_results(
         results: dict[str, dict[str, float]],
         qrels: dict[str, dict[str, int]],
-        k_values: list[int] = None,
+        k_values: Optional[list[int]] = None,
     ) -> dict[str, float]:
         """
         Evaluate retrieval results using NDCG and other metrics.
-        
+
         Args:
             results: dict mapping query_id to dict of {corpus_id: score}
             qrels: dict mapping query_id to dict of {corpus_id: relevance_score}
             k_values: List of k values for evaluation metrics
-        
+
         Returns:
             Dictionary of metric scores
         """
         try:
-            import pytrec_eval
             from mteb._evaluators.retrieval_metrics import (
                 calculate_retrieval_scores,
                 make_score_dict,
             )
         except ImportError:
-            raise ImportError("pytrec_eval is required for evaluation. Install with: pip install pytrec-eval")
-        
+            raise ImportError(
+                "pytrec_eval is required for evaluation. Install with: pip install pytrec-eval"
+            )
+
         if k_values is None:
             k_values = [1, 3, 5, 10, 100]
-        
+
         # Check if we have any queries to evaluate
         if len(results) == 0:
             print("Warning: No queries to evaluate. Returning zero scores.")
@@ -1246,38 +1282,42 @@ class ViDoReBenchmarkEvaluator:
                 scores[f"precision_at_{k}"] = 0.0
                 scores[f"mrr_at_{k}"] = 0.0
             return scores
-        
+
         print(f"Evaluating results with k_values={k_values}...")
         print(f"Before filtering: {len(results)} results, {len(qrels)} qrels")
-        
+
         # Filter to ensure qrels and results have the same query set
         # This matches MTEB behavior: only evaluate queries that exist in both
         # pytrec_eval only evaluates queries in qrels, so we need to ensure
         # results contains all queries in qrels, and filter out queries not in qrels
         results_filtered = {qid: res for qid, res in results.items() if qid in qrels}
-        qrels_filtered = {qid: rel_docs for qid, rel_docs in qrels.items() if qid in results_filtered}
-        
+        qrels_filtered = {
+            qid: rel_docs for qid, rel_docs in qrels.items() if qid in results_filtered
+        }
+
         print(f"After filtering: {len(results_filtered)} results, {len(qrels_filtered)} qrels")
-        
+
         if len(results_filtered) != len(qrels_filtered):
-            print(f"Warning: Mismatch between results ({len(results_filtered)}) and qrels ({len(qrels_filtered)}) queries")
+            print(
+                f"Warning: Mismatch between results ({len(results_filtered)}) and qrels ({len(qrels_filtered)}) queries"
+            )
             missing_in_results = set(qrels.keys()) - set(results.keys())
             if missing_in_results:
                 print(f"Queries in qrels but not in results: {len(missing_in_results)} queries")
                 print(f"First 5 missing queries: {list(missing_in_results)[:5]}")
-        
+
         # Convert qrels to pytrec_eval format
         qrels_pytrec = {}
         for qid, rel_docs in qrels_filtered.items():
-            qrels_pytrec[qid] = {did: score for did, score in rel_docs.items()}
-        
+            qrels_pytrec[qid] = dict(rel_docs.items())
+
         # Evaluate
         eval_result = calculate_retrieval_scores(
             results=results_filtered,
             qrels=qrels_pytrec,
             k_values=k_values,
         )
-        
+
         # Format scores
         scores = make_score_dict(
             ndcg=eval_result.ndcg,
@@ -1290,5 +1330,5 @@ class ViDoReBenchmarkEvaluator:
             cv_recall=eval_result.cv_recall,
             task_scores={},
         )
-        
+
         return scores
