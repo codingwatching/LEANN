@@ -169,7 +169,7 @@ class ImageRAG(BaseRAGExample):
         print(f"✅ Processed {len(image_data)} images")
         return image_data
 
-    async def build_index(self, args, texts: list[str]) -> str:
+    async def build_index(self, args, texts: list[dict[str, Any]]) -> str:
         """Build index using pre-computed CLIP embeddings."""
         from leann.api import LeannBuilder
 

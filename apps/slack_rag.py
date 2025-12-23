@@ -189,7 +189,8 @@ class SlackMCPRAG(BaseRAGExample):
                 print(sample_text)
                 print("-" * 40)
 
-            return texts
+            # Convert strings to dict format expected by base class
+            return [{"text": text, "metadata": {"source": "slack"}} for text in texts]
 
         except Exception as e:
             print(f"Error loading Slack data: {e}")

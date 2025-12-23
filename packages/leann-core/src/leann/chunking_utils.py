@@ -243,7 +243,7 @@ def create_ast_chunks(
                 astchunk_metadata: dict[str, Any] = {}
 
                 if hasattr(chunk, "text"):
-                    chunk_text = chunk.text
+                    chunk_text = str(chunk.text) if chunk.text else None
                 elif isinstance(chunk, str):
                     chunk_text = chunk
                 elif isinstance(chunk, dict):
