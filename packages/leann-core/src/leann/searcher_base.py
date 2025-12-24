@@ -56,7 +56,9 @@ class BaseSearcher(LeannBackendSearcherInterface, ABC):
         with open(meta_path, encoding="utf-8") as f:
             return json.load(f)
 
-    def _ensure_server_running(self, passages_source_file: str, port: Optional[int], **kwargs) -> int:
+    def _ensure_server_running(
+        self, passages_source_file: str, port: Optional[int], **kwargs
+    ) -> int:
         """
         Ensures the embedding server is running if recompute is needed.
         This is a helper for subclasses.
