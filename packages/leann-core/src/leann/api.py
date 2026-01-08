@@ -11,6 +11,7 @@ import re
 import subprocess
 import time
 import warnings
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
@@ -274,6 +275,82 @@ class PassageManager:
 
     def __len__(self) -> int:
         return self._total_count
+
+
+class BM25Scorer:
+    def __init__(self, k1: float = 1.2, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+        self.doc_freqs = None  # How many docs contain each term (DF)
+        self.doc_lengths = {}  # How long each doc is (in words)
+        self.word_counts = {}  # How many times each word appears in each doc (TF)
+        self.avg_doc_length = None
+        self.corpus_size = None
+        self.idlist = set()  # List of all document IDs for easier searching
+
+    def _tokenize(self, text: str) -> list[str]:
+        return re.sub(r"[^\w\s]", "", text).lower().split()
+
+    def fit(self, documents: list[dict[str, Any]]):
+        """
+        Build BM25 statistics from a document corpus.
+        Must be called before scoring.
+        """
+        self.corpus_size = len(documents)
+        self.doc_lengths = {}
+        self.word_counts = {}
+        self.idlist = set()
+        doc_freqs = defaultdict(int)
+
+        for doc_data in documents:
+            doc_id = doc_data["id"]
+            words = self._tokenize(doc_data["text"])
+            doc_length = len(words)
+            self.doc_lengths[doc_id] = doc_length
+
+            unique_words = set(words)
+            for word in unique_words:
+                doc_freqs[word] += 1
+            self.word_counts[doc_id] = dict(Counter(words))
+            self.idlist.add(doc_id)
+
+        self.doc_freqs = dict(doc_freqs)
+        self.avg_doc_length = sum(self.doc_lengths.values()) / len(self.doc_lengths)
+
+    def score(self, query_words: list[str], document_id: str) -> float:
+        if (
+            self.doc_freqs is None
+            or self.doc_lengths == {}
+            or self.word_counts == {}
+            or self.avg_doc_length is None
+            or self.corpus_size is None
+        ):
+            raise ValueError("BM25 model not fitted. Call fit() before scoring.")
+
+        passage_words = self.word_counts[document_id]
+        passage_length = sum(passage_words.values())
+        score = 0.0
+        for word in query_words:
+            if word not in self.doc_freqs:
+                continue
+            word_freq = passage_words[word] if word in passage_words else 0
+            idf = np.log(
+                (self.corpus_size - self.doc_freqs[word] + 0.5) / (self.doc_freqs[word] + 0.5) + 1
+            )
+            tf = (word_freq * (self.k1 + 1)) / (
+                word_freq + self.k1 * (1 - self.b + self.b * (passage_length / self.avg_doc_length))
+            )
+            score += idf * tf
+        return score
+
+    def search(self, query: str, top_k: int = 5) -> list[SearchResult]:
+        query_words = self._tokenize(query)
+        scores = {doc_id: self.score(query_words, doc_id) for doc_id in self.idlist}
+        sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [
+            SearchResult(id=doc_id, score=score, text="", metadata={})
+            for doc_id, score in sorted_scores[:top_k]
+        ]
 
 
 class LeannBuilder:
@@ -902,6 +979,7 @@ class LeannSearcher:
         self.backend_impl: LeannBackendSearcherInterface = backend_factory.searcher(
             index_path, **final_kwargs
         )
+        self.bm25_scorer = None
 
     def search(
         self,
@@ -916,6 +994,7 @@ class LeannSearcher:
         metadata_filters: Optional[dict[str, dict[str, Union[str, int, float, bool, list]]]] = None,
         batch_size: int = 0,
         use_grep: bool = False,
+        gemma: float = 1.0,
         provider_options: Optional[dict[str, Any]] = None,
         **kwargs,
     ) -> list[SearchResult]:
@@ -938,6 +1017,7 @@ class LeannSearcher:
                 - Membership: "in", "not_in"
                 - String: "contains", "starts_with", "ends_with"
                 Example: {"chapter": {"<=": 5}, "tags": {"in": ["fiction", "drama"]}}
+            gemma: Weight of vector search results in hybrid search (0.0-1.0), 1 = pure vector search, 0 = pure keyword search
             **kwargs: Backend-specific parameters
 
         Returns:
@@ -1024,6 +1104,33 @@ class LeannSearcher:
             top_k,
             **backend_search_kwargs,
         )
+
+        # Handle hybrid search
+        if gemma < 1.0:
+            logger.info(f"  🌟 Hybrid search enabled with gemma={gemma}")
+            BM25_WEIGHT = 1.0 - gemma
+            bm25_results = self._bm25_search(query, top_k)
+            hybrid_scores: dict[str, float] = {}
+            # Add vector search scores (weighted by gemma)
+            if "labels" in results and "distances" in results:
+                for doc_id, score in zip(results["labels"][0], results["distances"][0]):
+                    hybrid_scores[doc_id] = gemma * score
+            # Add BM25 scores (weighted by BM25_WEIGHT)
+            for bm25_result in bm25_results:
+                doc_id = bm25_result.id
+                if doc_id in hybrid_scores:
+                    hybrid_scores[doc_id] += BM25_WEIGHT * bm25_result.score
+                else:
+                    hybrid_scores[doc_id] = BM25_WEIGHT * bm25_result.score
+
+            sorted_hybrid = sorted(hybrid_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+            results["labels"] = [[doc_id for doc_id, _ in sorted_hybrid]]
+            results["distances"] = [[score for _, score in sorted_hybrid]]
+
+            logger.info(
+                f"  Combined {len(hybrid_scores)} unique documents from vector and BM25 search"
+            )
+
         search_time = time.time() - start_time
         logger.info(f"  Search time in search() LEANN searcher: {search_time} seconds")
         logger.info(f"  Backend returned: labels={len(results.get('labels', [[]])[0])} results")
@@ -1076,6 +1183,26 @@ class LeannSearcher:
         RESET = "\033[0m"
         logger.info(f"  {GREEN}✓ Final enriched results: {len(enriched_results)} passages{RESET}")
         return enriched_results
+
+    def _init_bm25(self) -> None:
+        """Initialize BM25 scorer"""
+        self.bm25_scorer = BM25Scorer()
+        # Load all the files directly
+        passages = []
+        for passage_file in self.passage_manager.passage_files.values():
+            with open(passage_file, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        data = json.loads(line)
+                        passages.append(data)
+        self.bm25_scorer.fit(passages)
+
+    def _bm25_search(self, query: str, top_k: int = 5) -> list[SearchResult]:
+        """Perform BM25 search on raw passages"""
+        if not self.bm25_scorer:
+            self._init_bm25()
+            logger.info("  BM25 scorer initialized")
+        return self.bm25_scorer.search(query, top_k)
 
     def _find_jsonl_file(self) -> Optional[str]:
         """Find the .jsonl file containing raw passages for grep search"""
@@ -1223,6 +1350,7 @@ class LeannChat:
         metadata_filters: Optional[dict[str, dict[str, Union[str, int, float, bool, list]]]] = None,
         batch_size: int = 0,
         use_grep: bool = False,
+        gemma: float = 1.0,
         **search_kwargs,
     ):
         if llm_kwargs is None:
@@ -1238,6 +1366,8 @@ class LeannChat:
             pruning_strategy=pruning_strategy,
             expected_zmq_port=expected_zmq_port,
             metadata_filters=metadata_filters,
+            use_grep=use_grep,
+            gemma=gemma,
             batch_size=batch_size,
             **search_kwargs,
         )
