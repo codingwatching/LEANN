@@ -406,6 +406,17 @@ Examples:
             "--force", "-f", action="store_true", help="Force removal without confirmation"
         )
 
+        # Serve command (HTTP API server)
+        serve_parser = subparsers.add_parser(
+            "serve", help="Start HTTP API server for LEANN vector DB"
+        )
+        serve_parser.add_argument(
+            "--host", type=str, default=None, help="Host to bind to (default: 0.0.0.0)"
+        )
+        serve_parser.add_argument(
+            "--port", type=int, default=None, help="Port to bind to (default: 8000)"
+        )
+
         return parser
 
     def register_project_dir(self):
@@ -1715,6 +1726,35 @@ Examples:
 
             _ask_once(query)
 
+    async def serve_api(self, args):
+        """Start the HTTP API server."""
+        import os
+
+        try:
+            from .server import main as server_main
+
+            # Override host/port if provided via CLI args
+            if args.host:
+                os.environ["LEANN_SERVER_HOST"] = args.host
+            if args.port:
+                os.environ["LEANN_SERVER_PORT"] = str(args.port)
+
+            # Run the server (this is blocking, so we don't await it)
+            # The server_main function handles uvicorn.run which blocks
+            server_main()
+        except ImportError as e:
+            print(
+                "❌ HTTP server dependencies not installed.\n"
+                "Install them with:\n"
+                "  uv pip install 'leann-core[server]'\n"
+                "or:\n"
+                "  uv pip install 'fastapi>=0.115' 'pydantic>=2' 'uvicorn[standard]'\n"
+            )
+            raise SystemExit(1) from e
+        except Exception as e:
+            print(f"❌ Error starting server: {e}")
+            raise SystemExit(1) from e
+
     async def run(self, args=None):
         parser = self.create_parser()
 
@@ -1740,8 +1780,9 @@ Examples:
             with suppress_cpp_output(suppress):
                 await self.search_documents(args)
         elif args.command == "ask":
-            with suppress_cpp_output(suppress):
-                await self.ask_questions(args)
+            await self.ask_questions(args)
+        elif args.command == "serve":
+            await self.serve_api(args)
         else:
             parser.print_help()
 

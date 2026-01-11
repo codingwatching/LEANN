@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "leann-core"
-version = "0.3.5"
+version = "0.3.6"
 description = "Core API and plugin system for LEANN"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,6 +44,11 @@ colab = [
     "torch>=2.0.0,<3.0.0",  # Limit torch version to avoid conflicts
     "transformers>=4.30.0,<4.46",  # 4.46.0 switches to PEP 604 typing (int | None), breaks Py3.9
     "accelerate>=0.20.0,<1.0.0",  # Limit accelerate version
+]
+server = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.0.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 
 [project.scripts]
